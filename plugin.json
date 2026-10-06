@@ -1,0 +1,15 @@
+{
+  "name": "Finally Achievement Plugin",
+  "author": "otisabi",
+  "description": "Finally Achievement Plugin: SteamOS achievement popups in 18 templates, plus an achievement browser and an on-screen tracker that share the popup look.",
+  "version": "1.4.0",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["style", "steam", "achievement", "notification", "steamos"],
+    "description": "SteamOS achievement popups with selectable templates, colors and sounds, plus a built-in achievement browser and pinned-achievement tracker.",
+    "image": "https://opengraph.githubassets.com/1/otisabi/finally-achievement-plugin",
+    "resourceLink": "https://github.com/otisabi/finally-achievement-plugin"
+  },
+  "main": "main.py"
+}

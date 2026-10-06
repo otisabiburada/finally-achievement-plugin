@@ -1,0 +1,345 @@
+<p align="center">
+  <img src="docs/images/banner.png" alt="Finally Achievement Plugin" width="100%">
+</p>
+
+<p align="center">
+  <b>Achievement popups for Steam Deck &amp; SteamOS, built for Decky Loader.</b><br>
+  18 popup templates, rarity tiers with their own sounds, an achievement browser and an on-screen tracker.
+</p>
+
+<p align="center">
+  <img alt="Decky Loader" src="https://img.shields.io/badge/Decky%20Loader-plugin-6366f1">
+  <img alt="Platform" src="https://img.shields.io/badge/SteamOS-Steam%20Deck-1a9fff">
+  <img alt="License" src="https://img.shields.io/badge/license-BSD--3--Clause-green">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-f59e0b">
+</p>
+
+---
+
+# Finally Achievement Plugin
+
+Finally Achievement Plugin shows a popup in-game every time you unlock a Steam achievement, with sounds that change by rarity. It also lets you browse every achievement of the game you are playing and pin one on screen as a tracker.
+
+## Highlights
+
+- **18 popup templates**: modern, glass, retro arcade, terminal, game-art blur and more. Pick colors, size and position.
+- **Rarity tiers**: common, uncommon, rare and ultra rare popups, each with its own bundled sound. Drop in your own `.wav`, `.flac`, `.ogg` or `.mp3`.
+- **Real achievement icons** from Steam when available.
+- **Achievement browser**: see locked and unlocked achievements with rarity and unlock dates. Secret ones stay hidden until unlocked.
+- **On-screen tracker**: pin an achievement and follow its progress while you play. It uses your popup look.
+- **Per-game settings** for sounds and style.
+- **Fast local detection** on SteamOS, with an optional Steam Web API fallback.
+- **Test buttons** in Decky to preview every popup and sound.
+
+<p align="center">
+  <img src="docs/images/popups.png" alt="Popup templates and rarity tiers" width="90%">
+</p>
+
+## Browser and tracker preview
+
+<p align="center">
+  <img src="docs/images/browser.png" alt="Achievement browser and tracker" width="90%">
+</p>
+
+> The images above are illustrative mockups. Real screenshots from the Steam Deck can replace them in `docs/images/`.
+
+## What You Need
+
+- A Steam Deck or SteamOS device.
+- Decky Loader installed.
+- A working internet connection on the Steam Deck.
+- About 5 minutes.
+
+If Decky Loader is not installed yet, install it first from:
+
+[https://decky.xyz](https://decky.xyz)
+
+## Install Finally Achievement Plugin
+
+This is the easiest method. You only need to copy and paste commands.
+
+1. Hold the power button on your Steam Deck.
+2. Choose `Switch to Desktop`.
+3. Open the app called `Konsole`.
+4. Copy this whole block and paste it into Konsole:
+
+```bash
+mkdir -p ~/homebrew/plugins
+cd ~/Downloads
+rm -rf finally.zip finally-achievement-plugin-main
+curl -L https://github.com/otisabi/finally-achievement-plugin/archive/refs/heads/main.zip -o finally.zip
+unzip finally.zip
+rm -rf "$HOME/homebrew/plugins/Finally Achievement Plugin"
+mv finally-achievement-plugin-main "$HOME/homebrew/plugins/Finally Achievement Plugin"
+chmod +x "$HOME/homebrew/plugins/Finally Achievement Plugin/finally_gamescope_overlay.py" "$HOME/homebrew/plugins/Finally Achievement Plugin/tracker_overlay.py"
+```
+
+5. Restart Decky Loader with this command:
+
+```bash
+sudo systemctl restart plugin_loader
+```
+
+6. If SteamOS asks for a password, enter your Deck sudo password.
+7. If you do not know the sudo password, just restart the Steam Deck instead.
+8. Go back to Gaming Mode.
+9. Open the Decky menu.
+10. You should see `Finally Achievement Plugin`.
+
+The plugin folder must be exactly here:
+
+```text
+/home/deck/homebrew/plugins/Finally Achievement Plugin
+```
+
+Do not put it in `Downloads`, and do not leave it inside another folder like `finally-achievement-plugin-main/Finally Achievement Plugin`.
+
+## Manual Install With Dolphin
+
+Use this if you do not want to paste commands.
+
+1. Switch to Desktop Mode.
+2. Open this page in a browser:
+
+[https://github.com/otisabi/finally-achievement-plugin](https://github.com/otisabi/finally-achievement-plugin)
+
+3. Press the green `Code` button.
+4. Press `Download ZIP`.
+5. Open the downloaded ZIP in Dolphin.
+6. Extract it.
+7. Rename the extracted folder to:
+
+```text
+Finally Achievement Plugin
+```
+
+8. Move that `Finally Achievement Plugin` folder to:
+
+```text
+/home/deck/homebrew/plugins/
+```
+
+The final path should look like this:
+
+```text
+/home/deck/homebrew/plugins/Finally Achievement Plugin/plugin.json
+/home/deck/homebrew/plugins/Finally Achievement Plugin/main.py
+/home/deck/homebrew/plugins/Finally Achievement Plugin/dist/index.js
+```
+
+9. Restart the Steam Deck.
+10. Open Decky in Gaming Mode and look for `Finally Achievement Plugin`.
+
+## Update Finally Achievement Plugin
+
+To update to the newest GitHub version:
+
+1. Switch to Desktop Mode.
+2. Open `Konsole`.
+3. Paste this:
+
+```bash
+cd ~/Downloads
+rm -rf finally.zip finally-achievement-plugin-main
+curl -L https://github.com/otisabi/finally-achievement-plugin/archive/refs/heads/main.zip -o finally.zip
+unzip finally.zip
+rm -rf "$HOME/homebrew/plugins/Finally Achievement Plugin"
+mv finally-achievement-plugin-main "$HOME/homebrew/plugins/Finally Achievement Plugin"
+chmod +x "$HOME/homebrew/plugins/Finally Achievement Plugin/finally_gamescope_overlay.py" "$HOME/homebrew/plugins/Finally Achievement Plugin/tracker_overlay.py"
+sudo systemctl restart plugin_loader
+```
+
+If the last command asks for a password you do not know, restart the Steam Deck instead.
+
+Your Finally Achievement Plugin settings are stored separately, so updating the plugin should not remove your settings.
+
+Settings are stored here:
+
+```text
+/home/deck/homebrew/settings/Finally Achievement Plugin/settings.json
+```
+
+## Remove Finally Achievement Plugin
+
+1. Switch to Desktop Mode.
+2. Open `Konsole`.
+3. Paste this:
+
+```bash
+rm -rf "$HOME/homebrew/plugins/Finally Achievement Plugin"
+sudo systemctl restart plugin_loader
+```
+
+If you cannot use `sudo`, restart the Steam Deck after deleting the folder.
+
+## Settings
+
+Inside the Decky menu, Finally Achievement Plugin has settings for:
+
+- Popup size from `0%` to `100%`.
+- Volume from `0%` to `100%`.
+- Normal achievement sound.
+- Rare achievement sound.
+- Normal popup gradient colors.
+- Rare popup gradient colors.
+
+Default size is `50%`.
+
+Default volume is `50%`.
+
+## Troubleshooting
+
+If Finally Achievement Plugin does not appear in Decky:
+
+- Check that the folder is exactly `/home/deck/homebrew/plugins/Finally Achievement Plugin`.
+- Check that `/home/deck/homebrew/plugins/Finally Achievement Plugin/plugin.json` exists.
+- Restart the Steam Deck.
+
+If you hear the sound but do not see the popup:
+
+- Open Finally Achievement Plugin settings.
+- Make sure popup size is not `0%`.
+- Press `Test XBOX Popup`.
+- Restart the Steam Deck if it still does not show.
+
+If achievement popups repeat after a restart:
+
+- Update Finally Achievement Plugin to the newest GitHub version.
+- Restart the Steam Deck.
+
+## Features
+
+- Xbox-style achievement popup in-game.
+- Real Steam achievement icon when Steam has one available.
+- Special rare achievement animation.
+- Normal and rare `.wav` sounds.
+- Fast local SteamOS achievement detection.
+- Optional Steam Web API fallback.
+- Manual test buttons inside Decky.
+
+## For Developers
+
+The frontend in `src/` is compiled into `dist/index.js`, which Decky loads. **Build it before installing from a ZIP or publishing a release**, otherwise the plugin has no UI:
+
+```bash
+pnpm install
+pnpm build
+python3 -m py_compile main.py steamworks_probe.py steamworks_list_probe.py steamworks_track_probe.py finally_gamescope_overlay.py finally_cairo_ctypes.py finally_diagnose.py tracker_overlay.py
+```
+
+Deploy to a Steam Deck over SSH (the script needs your Deck's address and sudo password, nothing is stored in the repo):
+
+```bash
+TARGET_HOST=deck@steamdeck.local DECK_PASS='your-sudo-password' ./deploy.sh
+```
+
+The plugin folder on the Deck is:
+
+```text
+/home/deck/homebrew/plugins/Finally Achievement Plugin
+```
+
+## AI Disclosure
+
+Parts of this plugin were developed with AI-assisted coding support. All generated code and content were manually reviewed, edited, and tested before publication.
+
+
+## Achievement browser and tracker
+
+The old separate achievements plugin is now built in. Open the Finally Achievement Plugin panel and switch **Show** to
+**Achievements & tracker**. The panel is split into five views to keep each screen short: **Popup** (game settings,
+appearance, rarity tiers), **Colors & style** (colors, glow, text), **Sound & tests**, **Achievements & tracker**
+and **Advanced** (overlay check, icon accuracy / Web API key, watcher status):
+
+- Browse every achievement of the running game (locked and unlocked) with rarity and unlock dates. Secret
+  achievements stay hidden until unlocked.
+- Search the list by typing part of a name or description (every word you type has to match), with a result count and a
+  clear button. Sorting still applies to the results.
+- Press the action button on an achievement to pin it as a small on-screen tracker.
+- The tracker shows the achievement's description (or a progress count and bar when the game tracks one), has no drop shadow, and is drawn with your popup template and colors (including "Use each template's own colors" and the
+  gradient options), and it slides away while a popup shows, then slides back.
+- Tracker position, size and template are in the same view. The template defaults to "Same as popups"; pick any
+  other (for example **Game Art Blur**) to give the tracker its own look.
+
+Only one gamescope overlay window can be shown at a time, so the plugin manages it for both. If you used the old
+plugin, remove it: your pinned achievement, position and size are carried over the first time this version starts.
+
+## Game Art Blur template
+
+A popup and tracker template that uses the running game's own artwork as the card background, blurred, under a
+black vignette. Pick **Game Art Blur** in the template list. With no game running (or no artwork found) it falls
+back to a plain dark card with the vignette.
+
+## Sound plays but no popup shows
+
+The popup is drawn by a helper process that needs a working display, Python graphics packages and OpenGL. The plugin
+detects the X display and runtime folder automatically (it used to assume a Steam Deck's `:0` and `/run/user/1000`)
+and retries another display if the first can't be reached. If popups still don't appear, open the **Advanced** view
+and press **Run overlay check**. It tests each requirement (pycairo, PyGObject and its typelibs, GLFW, OpenGL, X11,
+display connection, creating a transparent window) and tells you which one is missing. The result also shows the last
+popup's error. Send that to whoever is helping you.
+
+## Sounds per popup type, and your own sounds
+
+**Sound & tests** has one sound for each popup type: common, uncommon, rare, ultra rare and the completionist
+popup. Uncommon and ultra rare sounds need **Rarity Tiers** on (otherwise common/rare sounds play, as before). The
+defaults are the same two sounds the plugin always used, so nothing changes until you pick something.
+
+To use your own sounds, put files (.wav, .flac, .ogg, .mp3 or .aiff, 10 MB or less) in
+`~/homebrew/settings/Finally Achievement Plugin/sounds/`, press **Refresh sound list** in the panel, and pick them (they're shown with
+"(yours)"). That folder is kept when the plugin is updated. Notes:
+
+- Keep them short: a sound is cut off after about 20 seconds.
+- A file of yours with the same name as a bundled sound replaces it.
+- The bundled `*_preroll` sounds begin with a short silence so the sound lines up with the popup; your files start
+  immediately, and the popup no longer waits for them.
+- Playback goes through `paplay`, so the formats available depend on the system's libsndfile (WAV and FLAC always;
+  OGG and MP3 on current SteamOS).
+- Each game's own settings can use different sounds too.
+
+## Tier sounds (bundled)
+
+Four original synthesized sounds are bundled for the per-tier sound slots: `finally_common.wav`, `finally_uncommon.wav`,
+`finally_rare.wav` and `finally_ultra_rare.wav`. They share one character (a cinematic swell into a bright hit, glassy
+bell shimmer in F sharp major, a fast sparkle run and a long reverb tail) and get bigger with rarity: about 1.2 s, 1.8 s,
+4 s and 7.7 s, with loudness stepping up about 3 dB per tier. Choose them in **Sound & tests**. They are not the
+defaults, so nothing changes until you pick them. `tools/make_tier_sounds.py` regenerates them.
+
+## Percentage badge position
+
+By default the "4.7% of players" badge sits in the bottom right of the popup, which narrows the description beside it.
+Set **Percentage badge position** (Popup view, Appearance) to **Top right** to move the badge to the top right corner.
+The description then gets the card's full width, so short descriptions no longer end in "...", and longer ones can use
+two lines. On the pill-shaped Xbox 360 templates the badge is kept inside the curved end, and on Chat Toast the "now"
+stamp moves left of it.
+
+## Colored (unlocked) achievement icons
+
+Popups should always use the unlocked, colored icon, never the gray locked one. The icon is chosen from these sources,
+best first, and every non-Steam-schema icon is checked for being gray before it's used:
+1. Steam's Web API schema (needs your key).
+2. Steam's own local achievement data (`appcache/stats/UserGameStatsSchema_<appid>.bin`), which lists each
+   achievement's colored and gray icon. No key or network needed.
+3. Steam's local library cache icon. If it looks gray (or can't be checked), the public Steam achievements page is
+   tried, then the cache is re-read for up to about 3.4 seconds while Steam updates it.
+The panel's Achievement Icon Accuracy section shows which source the last popup used. If only a gray icon exists, it
+says so rather than guessing.
+
+## "Authorization required" / popup crashes on start
+
+If the popup helper can't reach the X display because an X authorization cookie is needed, the plugin now finds the
+cookie the Steam client uses (and a few standard locations), tries display and cookie combinations (up to five), and
+remembers the one that works. The helper also checks the display before loading graphics libraries, so a refused
+connection ends with a clear message instead of crashing.
+
+## Devices without pycairo (Legion Go and other handhelds)
+
+SteamOS ships pycairo and PyGObject, but other handheld images often don't, and the popup used to fail there with
+"No module named 'cairo'" (sound played, no popup). The renderer now falls back to `finally_cairo_ctypes.py`, which
+draws through the system `libcairo`, `libpango`, `libpangocairo`, `libgdk_pixbuf` and `libgobject` using ctypes. It
+provides only the calls the renderer uses and needs no Python packages at all. On a Steam Deck nothing changes
+(pycairo + PyGObject are still used). Set `FINALLY_FORCE_CTYPES_DRAWING=1` to force the ctypes layer.
+
+The overlay check (Advanced view) now reports which drawing libraries are in use, and treats a missing pycairo or
+PyGObject as informational when the system libraries are present. The popup window itself still needs GLFW 3,
+OpenGL and X11 libraries; the check says if one of those is missing.

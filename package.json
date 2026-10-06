@@ -1,0 +1,41 @@
+{
+  "name": "finally-achievement-plugin",
+  "version": "1.4.0",
+  "description": "Decky Loader plugin: SteamOS achievement popups with an achievement browser and tracker",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w"
+  },
+  "keywords": [
+    "decky",
+    "steam-deck",
+    "achievement",
+    "finally",
+    "steamos"
+  ],
+  "author": "otisabi",
+  "license": "BSD-3-Clause",
+  "devDependencies": {
+    "@decky/rollup": "^1.0.2",
+    "@decky/ui": "^4.11.0",
+    "@types/react": "19.1.1",
+    "@types/react-dom": "19.1.1",
+    "rollup": "^4.53.3",
+    "rollup-plugin-postcss": "^4.0.2",
+    "typescript": "^5.6.2"
+  },
+  "dependencies": {
+    "@decky/api": "^1.1.3",
+    "react-icons": "^5.3.0",
+    "tslib": "^2.7.0"
+  },
+  "pnpm": {
+    "peerDependencyRules": {
+      "ignoreMissing": [
+        "react",
+        "react-dom"
+      ]
+    }
+  }
+}
