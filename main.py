@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import ctypes
 import datetime as dt
 import glob
@@ -17,6 +18,26 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import decky
 
+
+def _load_i18n():
+    """finally_i18n.py from the plugin folder, or None (the plugin then stays in English)."""
+    try:
+        import importlib.util
+        path = os.path.join(decky.DECKY_PLUGIN_DIR, "finally_i18n.py")
+        spec = importlib.util.spec_from_file_location("finally_i18n", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception as err:  # noqa: BLE001
+        try:
+            decky.logger.warning("Translations unavailable: %s", err)
+        except Exception:
+            pass
+        return None
+
+
+_I18N = None
+
 STEAM_LOG_PATH = "/home/deck/.local/share/Steam/logs/stats_log.txt"
 STEAM_LOG_DIR = os.path.dirname(STEAM_LOG_PATH)
 STEAM_USERDATA_GLOB = "/home/deck/.local/share/Steam/userdata/*"
@@ -27,7 +48,7 @@ STEAMWORKS_LIB_PATH = "/home/deck/.local/share/Steam/steamrt64/libsteam_api.so"
 STEAMWORKS_HELPER_NAME = "steamworks_probe.py"
 FINALLY_OVERLAY_HELPER_NAME = "finally_gamescope_overlay.py"
 STEAMWORKS_PYTHON = "/usr/bin/python3"
-STEAM_COMMUNITY_STATS_URL = "https://steamcommunity.com/stats/{appid}/achievements/?l=english"
+STEAM_COMMUNITY_STATS_URL = "https://steamcommunity.com/stats/{appid}/achievements/?l={lang}"
 # Gray-icon detection (see _icon_color_verdict): Steam's locked icons are
 # desaturated copies, so mean per-pixel chroma (max(rgb)-min(rgb), 0-255) is
 # ~0. Colored icons sit well above this.
@@ -83,6 +104,16 @@ INOTIFY_DEBOUNCE_SECONDS = 0.10
 STEAMWORKS_APPID_SCAN_INTERVAL_SECONDS = 1.0
 STEAMWORKS_POLL_INTERVAL_MS = 100
 STEAMWORKS_RESTART_COOLDOWN_SECONDS = 15.0
+# How often the achievement helper asks Steam to resend the game's stats. Without
+# this, some setups (reported on a Steam Machine) only notice an unlock after a
+# long delay or after the Steam button is pressed.
+STEAMWORKS_REFRESH_INTERVAL_MS = 2000
+DESCRIPTION_LOOKUP_SECONDS = 3.0
+# Steam writes appcache/stats/UserGameStats_<account>_<appid>.bin the moment a game stores an unlock, long before
+# the library page data (librarycache) is refreshed. This watcher reads that file directly.
+STATS_BIN_SCAN_INTERVAL_SECONDS = 1.0
+STATS_BIN_NEW_WINDOW_SECONDS = 90          # a file seen for the first time: only unlocks this recent count as new
+DESCRIPTION_MAX_ATTEMPTS = 3
 DUPLICATE_WINDOW_SECONDS = 8.0
 RARE_PERCENT_THRESHOLD = 10.0
 SKIP_CACHE_FILES = {"achievement_progress.json"}
@@ -136,6 +167,8 @@ DEFAULT_SETTINGS = {
     "overlay_size_percent": 50,
     "volume_percent": 50,
     "overlay_position": "bottom_center",
+    "overlay_screen": "auto",
+    "language": "auto",
     "overlay_template": "xbox_modern",
     "label_font_size": 13,
     "title_font_size": 26,
@@ -158,6 +191,9 @@ DEFAULT_SETTINGS = {
     "placeholder_icon": "auto",
     "game_art_gradient_enabled": False,
     "completion_toast_enabled": True,
+    "session_summary_enabled": True,
+    "near_completion_enabled": True,
+    "near_completion_threshold": 2,
     "completion_title": "completionist",
     "percent_size": 100,
     "percent_position": "bottom_right",
@@ -195,10 +231,26 @@ PERCENT_SIZE_RANGE = (100, 70, 150)  # (default, lo, hi)
 # Where the unlock-percentage badge sits; "top_right" also lets descriptions use two lines.
 PERCENT_POSITIONS = ("bottom_right", "top_right")
 COMPLETION_MIN_SECONDS = 9.0
+# "Only N left" popup: fires when this many (or fewer) are still locked.
+NEAR_COMPLETION_RANGE = (1, 5)
+# Session summary: needs this many seconds of "no game running" in a row, so
+# a one-scan detection hiccup doesn't end a play session early.
+SESSION_END_SECONDS = 4.0
+MILESTONE_MIN_SECONDS = 6.0
+HISTORY_MAX_ENTRIES = 500
+SHARE_DIR_NAME = "Finally Achievements"
 COMPLETION_DELAY_SECONDS = 2.0
 COMPLETION_DEDUPE_SECONDS = 120.0
 # "auto" = original behavior (game icon if no achievement icon, else the gear badge).
 PLACEHOLDER_ICON_STYLES = ("auto", "trophy", "game_icon")
+# Popup canvas size. "auto" asks the X display (right on a Steam Deck's own
+# screen). On a TV or a handheld whose output differs from what gamescope
+# scales the overlay by, a fixed size from this list puts the popups back
+# where they belong (see "Popup screen size" in the panel).
+SCREEN_SIZE_CHOICES = (
+    "auto", "1280x800", "1920x1080", "1920x1200", "2560x1440", "2560x1600", "3840x2160",
+)
+LANGUAGE_CHOICES = ("auto", "en", "tr", "de", "fr", "es", "pt-BR", "ru", "zh-Hans", "pl")
 OVERLAY_POSITIONS = (
     "top_left",
     "top_center",
@@ -397,6 +449,19 @@ class Plugin:
         # appid -> monotonic time of the last completion toast, so the same
         # 100% moment can't fire twice (two detection paths, restarts).
         self._completion_last: Dict[int, float] = {}
+        self._history: Optional[List[Dict[str, Any]]] = None
+        self._session: Optional[Dict[str, Any]] = None
+        self._near_notified: Set[Tuple[int, int]] = set()
+        self._desc_cache: Dict[int, Dict[str, str]] = {}
+        self._desc_tried: Set[Tuple[int, str]] = set()
+        self._desc_attempts: Dict[Tuple[int, str], int] = {}
+        # Local stats files (see _watch_stats_bin): the schema (names and descriptions in every language) and unlock times.
+        self._stats_schema_cache: Dict[str, Tuple[int, Dict[str, Any]]] = {}
+        self._stats_known: Dict[str, Set[str]] = {}
+        self._stats_mtimes: Dict[str, int] = {}
+        self._stats_bin_task: Optional[asyncio.Task] = None
+        self._stats_bin_status: str = "not_started"
+        self._stats_bin_unlock_count: int = 0
         self._game_name_cache: Dict[int, str] = {}
         self._game_name_local_miss: Dict[int, float] = {}
         self._game_name_store_tried: Dict[int, float] = {}
@@ -437,6 +502,9 @@ class Plugin:
         self._steamworks_task = asyncio.create_task(
             self._watch_steamworks(), name="finally-steamworks-watch"
         )
+        self._stats_bin_task = asyncio.create_task(
+            self._watch_stats_bin(), name="finally-stats-bin-watch"
+        )
         self._ensure_user_sounds_dir()
         try:
             self._migrate_old_tracker_pin()
@@ -457,6 +525,7 @@ class Plugin:
                 self._librarycache_task,
                 self._steam_api_task,
                 self._steamworks_task,
+                self._stats_bin_task,
                 self._steamworks_reader_task,
                 self._steamworks_stderr_task,
                 self._tracker_task,
@@ -526,9 +595,20 @@ class Plugin:
         # edits go to that profile only; otherwise they go to the global
         # settings exactly as before.
         appid = self._active_appid
+        # The screen size and the language belong to the device, not to a
+        # game: always global, never part of a per-game profile.
+        device_patch = {k: settings[k] for k in ("overlay_screen", "language") if k in settings}
+        if device_patch:
+            self._save_settings(self._sanitize_settings({**self._load_settings(), **device_patch}))
+            settings = {k: v for k, v in settings.items() if k not in device_patch}
+            if "language" in device_patch:
+                self._steam_api_schema_icon_cache.clear()
+                self._community_icon_cache.clear()
         profile = self._enabled_profile(appid)
         if profile is not None:
             merged = self._sanitize_settings({**self._effective_settings(), **settings})
+            for key in ("overlay_screen", "language"):
+                merged[key] = self._load_settings()[key]
             profiles = self._load_game_profiles()
             entry = profiles.get(str(appid))
             if isinstance(entry, dict):
@@ -630,6 +710,18 @@ class Plugin:
             seen.add(real)
             roots.append(real)
         return roots
+
+    def _steamworks_lib_path(self) -> str:
+        """libsteam_api.so: the Steam Deck path first, then the same place under
+        whichever Steam install this system has (other users, Flatpak Steam)."""
+        if os.path.exists(STEAMWORKS_LIB_PATH):
+            return STEAMWORKS_LIB_PATH
+        for root in self._steam_roots():
+            for sub in ("steamrt64", "linux64", "ubuntu12_64"):
+                candidate = os.path.join(root, sub, "libsteam_api.so")
+                if os.path.exists(candidate):
+                    return candidate
+        return STEAMWORKS_LIB_PATH
 
     def _steam_library_dirs(self) -> List[str]:
         """Every Steam library folder (internal storage, SD card, other
@@ -942,7 +1034,7 @@ class Plugin:
             title_key = str(self._settings_for(settings_appid).get("completion_title", COMPLETION_TITLE_DEFAULT))
             timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
             payload = {
-                "title": COMPLETION_TITLES.get(title_key, COMPLETION_TITLES[COMPLETION_TITLE_DEFAULT]),
+                "title": self._tr(COMPLETION_TITLES.get(title_key, COMPLETION_TITLES[COMPLETION_TITLE_DEFAULT])),
                 "subtitle": game,
                 "is_rare": True,
                 "percent": None,
@@ -966,6 +1058,293 @@ class Plugin:
             decky.logger.info("Completion toast emitted for appid=%s (%s)", appid, game)
         except Exception as err:
             decky.logger.warning("Completion toast failed: %s", err)
+
+    # ---- unlock history, session summary, near-completion, share cards ----
+
+    def _history_path(self) -> str:
+        return os.path.join(self._settings_dir(), "history.json")
+
+    def _history_list(self) -> List[Dict[str, Any]]:
+        if self._history is None:
+            data = None
+            try:
+                with open(self._history_path(), "r", encoding="utf-8") as stream:
+                    data = json.load(stream)
+            except (OSError, ValueError):
+                data = None
+            items = data.get("unlocks") if isinstance(data, dict) else None
+            self._history = [e for e in items if isinstance(e, dict)] if isinstance(items, list) else []
+        return self._history
+
+    def _save_history(self) -> None:
+        try:
+            os.makedirs(self._settings_dir(), exist_ok=True)
+            tmp = self._history_path() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as stream:
+                json.dump({"unlocks": self._history_list()}, stream, ensure_ascii=False)
+            os.replace(tmp, self._history_path())
+        except OSError as err:
+            decky.logger.warning("Could not save unlock history: %s", err)
+
+    def _record_unlock(self, payload: Dict[str, Any]) -> None:
+        """Called for every real (non-test) unlock popup: logs it to the
+        history and counts it toward the current play session."""
+        appid = payload.get("appid")
+        if not isinstance(appid, int) or not payload.get("achievement_id"):
+            return
+        game = self._game_name(appid)
+        tier = payload.get("tier")
+        rare = bool(payload.get("is_rare")) or tier in ("rare", "ultra_rare")
+        entry = {
+            "ts": payload.get("timestamp"),
+            "appid": appid,
+            "game": game,
+            "id": payload.get("achievement_id"),
+            "title": payload.get("title") or "",
+            "subtitle": payload.get("subtitle") or "",
+            "percent": payload.get("percent"),
+            "tier": tier,
+            "rare": rare,
+            "icon_path": payload.get("icon_path"),
+        }
+        history = self._history_list()
+        history.append(entry)
+        if len(history) > HISTORY_MAX_ENTRIES:
+            del history[: len(history) - HISTORY_MAX_ENTRIES]
+        self._save_history()
+
+        session = self._session
+        if session is None or session.get("appid") != appid:
+            session = {"appid": appid, "unlocks": 0, "rare": 0}
+            self._session = session
+        session["unlocks"] += 1
+        if rare:
+            session["rare"] += 1
+
+    async def _describe_achievement(self, appid: int, achievement_id: str) -> str:
+        """The description of an achievement, for popups whose detection path
+        didn't carry one (Steam's web data leaves it empty for secret
+        achievements, and the library cache can lag). Looked up, in order, in
+        Steam's own local schema (every language, secret ones included; instant),
+        then asked of Steam through the list helper. A failed lookup can be
+        retried a couple of times; it is not given up on after one try."""
+        cache = self._desc_cache.setdefault(appid, {})
+        if achievement_id in cache:
+            return cache[achievement_id]
+        _name, local = await asyncio.to_thread(self._local_achievement_text, appid, achievement_id)
+        if local:
+            cache[achievement_id] = local
+            return local
+        key = (appid, achievement_id)
+        if key in self._desc_tried:
+            return ""
+        attempts = self._desc_attempts.get(key, 0) + 1
+        self._desc_attempts[key] = attempts
+        if attempts >= DESCRIPTION_MAX_ATTEMPTS:
+            self._desc_tried.add(key)
+        if not os.path.exists(self._steamworks_lib_path()):
+            return ""
+        probe = await self._run_oneshot_probe(appid, STEAMWORKS_LIST_HELPER_NAME)
+        for item in probe.get("achievements", []) if isinstance(probe, dict) else []:
+            text = str(item.get("desc") or "").strip()
+            if text and item.get("id"):
+                cache[str(item["id"])] = text
+        if achievement_id in cache:
+            self._desc_tried.add(key)
+        return cache.get(achievement_id, "")
+
+    async def get_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        try:
+            limit = max(1, min(HISTORY_MAX_ENTRIES, int(limit)))
+        except (TypeError, ValueError):
+            limit = 50
+        newest_first = list(reversed(self._history_list()))[:limit]
+        return [{k: v for k, v in e.items() if k != "icon_path"} for e in newest_first]
+
+    async def clear_history(self) -> bool:
+        self._history = []
+        self._save_history()
+        return True
+
+    async def _emit_milestone_toast(
+        self, appid: Optional[int], title: str, subtitle: str, delay: float = 0.0, label: str = "milestone"
+    ) -> None:
+        """A free-standing popup (session summary, "only N left") in the
+        same look as the completion popup, but without its completion sound."""
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            settings_appid = appid if appid is not None else self._active_appid
+            icon_path = await asyncio.to_thread(self._game_icon_path, appid) if appid is not None else None
+            timestamp = dt.datetime.now(dt.timezone.utc).isoformat()
+            payload = {
+                "title": title,
+                "subtitle": subtitle,
+                "is_rare": False,
+                "tier": None,
+                "percent": None,
+                "timestamp": timestamp,
+                "appid": appid,
+                "achievement_id": None,
+                "icon_url": None,
+                "icon_path": icon_path,
+                "placeholder_icon_path": None,
+                "game_art_path": None,
+                "settings_appid": settings_appid,
+                "template_override": COMPLETION_TEMPLATE,
+                "min_seconds": MILESTONE_MIN_SECONDS,
+                "completion": False,
+            }
+            asyncio.create_task(self._show_gamescope_overlay(payload))
+            await decky.emit("finally_show", payload)
+            self._last_match_timestamp = timestamp
+            self._last_match_sample = f"{label} appid={appid}"
+            self._last_match_source = label
+            decky.logger.info("Milestone toast (%s) for appid=%s: %s", label, appid, title)
+        except Exception as err:
+            decky.logger.warning("Milestone toast failed: %s", err)
+
+    def _session_summary_text(self, unlocked: int, rare: int) -> str:
+        if rare > 0:
+            return self._tr("{count} unlocked, {rare} rare", count=unlocked, rare=rare)
+        return self._tr("{count} unlocked", count=unlocked)
+
+    def _near_completion_text(self, remaining: int) -> str:
+        if remaining == 1:
+            return self._tr("Only 1 achievement left")
+        return self._tr("Only {count} achievements left", count=remaining)
+
+    def _end_session(self) -> None:
+        session, self._session = self._session, None
+        if not session or not session.get("unlocks"):
+            return
+        appid = session.get("appid")
+        if not isinstance(appid, int):
+            return
+        if not self._settings_for(appid).get("session_summary_enabled", True):
+            return
+        title = self._session_summary_text(int(session["unlocks"]), int(session.get("rare", 0)))
+        asyncio.create_task(
+            self._emit_milestone_toast(appid, title, self._game_name(appid), label="session_summary")
+        )
+
+    def _maybe_near_completion(self, appid: int, event: Dict[str, Any]) -> None:
+        unlocked, total = event.get("unlocked"), event.get("total")
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (unlocked, total)):
+            return
+        remaining = total - unlocked
+        settings = self._settings_for(appid)
+        if not settings.get("near_completion_enabled", True):
+            return
+        threshold = int(settings.get("near_completion_threshold", DEFAULT_SETTINGS["near_completion_threshold"]))
+        # Not for finished games (the completion popup covers those) and not
+        # for tiny achievement lists, where "2 left" is just most of the game.
+        if remaining < 1 or remaining > threshold or total < 2 * threshold + 2:
+            return
+        key = (appid, remaining)
+        if key in self._near_notified:
+            return
+        self._near_notified.add(key)
+        asyncio.create_task(
+            self._emit_milestone_toast(
+                appid,
+                self._near_completion_text(remaining),
+                self._game_name(appid),
+                delay=COMPLETION_DELAY_SECONDS,
+                label="near_completion",
+            )
+        )
+
+    async def test_session_popup(self) -> None:
+        appid = self._active_appid
+        game = self._game_name(appid) if appid is not None else "Sample Game"
+        await self._emit_milestone_toast(appid, self._session_summary_text(3, 1), game, label="session_summary")
+
+    async def test_near_completion_popup(self) -> None:
+        appid = self._active_appid
+        game = self._game_name(appid) if appid is not None else "Sample Game"
+        await self._emit_milestone_toast(appid, self._near_completion_text(2), game, label="near_completion")
+
+    @staticmethod
+    def _file_data_uri(path: Optional[str], limit: int = 6_000_000) -> Optional[str]:
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            if os.path.getsize(path) > limit:
+                return None
+            with open(path, "rb") as stream:
+                data = stream.read()
+        except OSError:
+            return None
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif data[:3] == b"\xff\xd8\xff":
+            mime = "image/jpeg"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            mime = "image/webp"
+        else:
+            return None
+        return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+
+    async def get_share_assets(self, appid: int, achievement_id: str, ts: str = "") -> Dict[str, Any]:
+        """Images (as data URIs) for the panel to draw a share card from."""
+        entry = None
+        for candidate in reversed(self._history_list()):
+            if candidate.get("appid") == appid and candidate.get("id") == achievement_id and (
+                not ts or candidate.get("ts") == ts
+            ):
+                entry = candidate
+                break
+        icon_path = entry.get("icon_path") if entry else None
+        if not icon_path or not os.path.isfile(str(icon_path)):
+            icon_path = self._achievement_icon_from_cache_file(appid, achievement_id)
+        art_path = await asyncio.to_thread(self._game_art_path, appid)
+        return {
+            "icon": self._file_data_uri(icon_path),
+            "art": self._file_data_uri(art_path),
+        }
+
+    def _achievement_icon_from_cache_file(self, appid: int, achievement_id: str) -> Optional[str]:
+        url = self._achievement_icon_from_cache(appid, achievement_id)
+        if not url:
+            return None
+        try:
+            return self._icon_cache_path(appid, achievement_id, url)
+        except Exception:
+            return None
+
+    def _share_dir(self) -> str:
+        home = getattr(decky, "DECKY_USER_HOME", None) or "/home/deck"
+        for base in (os.path.join(home, "Pictures"), home):
+            if os.path.isdir(base):
+                return os.path.join(base, SHARE_DIR_NAME)
+        return os.path.join(self._settings_dir(), SHARE_DIR_NAME)
+
+    async def save_share_card(self, png_base64: str, name: str = "achievement") -> Dict[str, Any]:
+        """Saves a card image the panel drew. Returns the path (or an error)."""
+        try:
+            raw = base64.b64decode(png_base64.split(",", 1)[-1], validate=False)
+        except Exception:
+            return {"ok": False, "error": "bad image data"}
+        if raw[:8] != b"\x89PNG\r\n\x1a\n" or len(raw) > 12_000_000:
+            return {"ok": False, "error": "not a PNG"}
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name))[:60].strip("._") or "achievement"
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        directory = self._share_dir()
+        try:
+            os.makedirs(directory, exist_ok=True)
+            path = os.path.join(directory, f"{safe}-{stamp}.png")
+            with open(path, "wb") as stream:
+                stream.write(raw)
+            try:
+                st = os.stat(os.path.dirname(directory) or directory)
+                os.chown(directory, st.st_uid, st.st_gid)
+                os.chown(path, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+        except OSError as err:
+            return {"ok": False, "error": str(err)}
+        return {"ok": True, "path": path}
 
     async def test_completion_popup(self) -> None:
         await self._emit_completion_toast(self._active_appid, delay=0.0)
@@ -1092,7 +1471,7 @@ class Plugin:
             )
             return
 
-        title, subtitle = self.TEST_TIER_SAMPLES[tier]
+        title, subtitle = (self._tr(text) for text in self.TEST_TIER_SAMPLES[tier])
         await self._emit_notification(
             title=title,
             subtitle=subtitle,
@@ -1258,6 +1637,18 @@ class Plugin:
         else:
             settings["overlay_position"] = DEFAULT_SETTINGS["overlay_position"]
 
+        screen = raw_settings.get("overlay_screen")
+        if isinstance(screen, str) and screen.strip().lower() in SCREEN_SIZE_CHOICES:
+            settings["overlay_screen"] = screen.strip().lower()
+        else:
+            settings["overlay_screen"] = DEFAULT_SETTINGS["overlay_screen"]
+
+        language = raw_settings.get("language")
+        if isinstance(language, str) and language.strip() in LANGUAGE_CHOICES:
+            settings["language"] = language.strip()
+        else:
+            settings["language"] = DEFAULT_SETTINGS["language"]
+
         template = raw_settings.get("overlay_template")
         if isinstance(template, str) and template.strip().lower() in OVERLAY_TEMPLATES:
             settings["overlay_template"] = template.strip().lower()
@@ -1359,6 +1750,18 @@ class Plugin:
             raw_settings.get(
                 "completion_toast_enabled", DEFAULT_SETTINGS["completion_toast_enabled"]
             )
+        )
+        settings["session_summary_enabled"] = bool(
+            raw_settings.get("session_summary_enabled", DEFAULT_SETTINGS["session_summary_enabled"])
+        )
+        settings["near_completion_enabled"] = bool(
+            raw_settings.get("near_completion_enabled", DEFAULT_SETTINGS["near_completion_enabled"])
+        )
+        settings["near_completion_threshold"] = self._coerce_int_range(
+            raw_settings.get("near_completion_threshold"),
+            DEFAULT_SETTINGS["near_completion_threshold"],
+            NEAR_COMPLETION_RANGE[0],
+            NEAR_COMPLETION_RANGE[1],
         )
         settings["game_art_gradient_enabled"] = bool(
             raw_settings.get(
@@ -1777,7 +2180,9 @@ class Plugin:
                     "paplay",
                     "--stream-name",
                     "Finally Achievement Plugin",
-                    "--property=media.role=event",
+                    # No media.role here: tagging the stream as an "event" sends it
+                    # to a role-based route that has no output on some setups
+                    # (Steam Machine, TVs over HDMI), so the popup sound was silent.
                     f"--volume={pulse_volume}",
                     sound_path,
                 ],
@@ -2143,7 +2548,7 @@ class Plugin:
         if resolved is None:
             return {"ok": False, "error": "no_running_game", "appid": None, "name": None, "achievements": []}
         name = self._game_name(resolved)
-        if not os.path.exists(STEAMWORKS_LIB_PATH):
+        if not os.path.exists(self._steamworks_lib_path()):
             return {"ok": False, "error": "steamworks_lib_missing", "appid": resolved, "name": name, "achievements": []}
 
         probe = await self._run_oneshot_probe(resolved, STEAMWORKS_LIST_HELPER_NAME)
@@ -2247,10 +2652,10 @@ class Plugin:
         env = os.environ.copy()
         env["SteamAppId"] = str(appid)
         env["SteamGameId"] = str(appid)
-        env["LD_LIBRARY_PATH"] = os.path.dirname(STEAMWORKS_LIB_PATH) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = os.path.dirname(self._steamworks_lib_path()) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
         try:
             process = await asyncio.create_subprocess_exec(
-                STEAMWORKS_PYTHON, helper_path, "--appid", str(appid), "--lib", STEAMWORKS_LIB_PATH,
+                STEAMWORKS_PYTHON, helper_path, "--appid", str(appid), "--lib", self._steamworks_lib_path(),
                 *(extra_args or []),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
             )
@@ -2393,6 +2798,7 @@ class Plugin:
         style["template"] = popup_template if tracker_template in ("same", None) else tracker_template
         style["position"] = settings.get("tracker_position", DEFAULT_SETTINGS["tracker_position"])
         style["size_percent"] = settings.get("tracker_size_percent", DEFAULT_SETTINGS["tracker_size_percent"])
+        style["language"] = self._language()
         return style
 
     @staticmethod
@@ -2431,6 +2837,9 @@ class Plugin:
         env.pop("LD_PRELOAD", None)
         # Plugin backends don't inherit DISPLAY/XDG_RUNTIME_DIR (see the toast overlay).
         env.update(self._overlay_session_env())
+        env.update(self._screen_env())
+        env["FINALLY_LANG"] = self._language()
+        env.update(self._fontconfig_env())      # extra font folders (Chinese fonts); harmless for other languages
         env["FINALLY_TRACKER_TARGET_FILE"] = paths["target"]
         env["FINALLY_TRACKER_STATE_FILE"] = paths["state"]
         env["FINALLY_TRACKER_STYLE_FILE"] = paths["style"]
@@ -2492,7 +2901,7 @@ class Plugin:
                     await self._stop_tracker_overlay()
                     await self._tracker_sleep(TRACKER_IDLE_POLL_SECONDS)
                     continue
-                if not os.path.exists(STEAMWORKS_LIB_PATH):
+                if not os.path.exists(self._steamworks_lib_path()):
                     await self._tracker_sleep(TRACKER_ACTIVE_POLL_SECONDS)
                     continue
 
@@ -2521,6 +2930,178 @@ class Plugin:
             except Exception as err:
                 decky.logger.warning("Tracker loop error: %s", err)
                 await self._tracker_sleep(TRACKER_ACTIVE_POLL_SECONDS)
+
+    # ------------------------------------------------------------------
+    # Language
+    #
+    # "auto" follows Steam's own language. The panel reads it from Steam's UI
+    # and tells us (set_detected_language); failing that it is read from
+    # Steam's registry.vdf. Popups use the same language as the panel.
+    # ------------------------------------------------------------------
+
+    def _i18n(self):
+        global _I18N
+        if _I18N is None:
+            _I18N = _load_i18n() or False
+        return _I18N or None
+
+    def _user_homes(self) -> List[str]:
+        homes = [str(getattr(decky, "DECKY_USER_HOME", "") or ""), "/home/deck"]
+        return [h for h in homes if h and os.path.isdir(h)]
+
+    def _detected_language_path(self) -> str:
+        return os.path.join(FINALLY_SETTINGS_DIR, "detected_language.txt")
+
+    def _steam_language_name(self) -> Optional[str]:
+        """Steam's language name as Steam spells it ("turkish", "japanese", ...), or None."""
+        i18n = self._i18n()
+        if i18n is None:
+            return None
+        raw = i18n.read_steam_registry_name(self._user_homes())
+        if raw:
+            return raw
+        try:
+            with open(self._detected_language_path(), "r", encoding="utf-8") as stream:
+                code = stream.read().strip()
+            return i18n.steam_api_language(code) if code in i18n.SUPPORTED else None
+        except OSError:
+            return None
+
+    def _steam_l_param(self) -> str:
+        """`l=` for Steam's web APIs and community pages: Steam's own language, so the
+        names match the ones Steam shows in the popups."""
+        return self._steam_language_name() or "english"
+
+    def _language(self) -> str:
+        """The language code popups and messages use."""
+        i18n = self._i18n()
+        if i18n is None:
+            return "en"
+        setting = str(self._load_settings().get("language", "auto"))
+        if setting != "auto":
+            return setting if setting in i18n.SUPPORTED else "en"
+        try:
+            with open(self._detected_language_path(), "r", encoding="utf-8") as stream:
+                code = stream.read().strip()
+            if code in i18n.SUPPORTED:
+                return code
+        except OSError:
+            pass
+        return i18n.language_from_steam(i18n.read_steam_registry_name(self._user_homes())) or "en"
+
+    def _tr(self, text: str, **values: Any) -> str:
+        i18n = self._i18n()
+        if i18n is None:
+            for name, value in values.items():
+                text = text.replace("{" + name + "}", str(value))
+            return text
+        return i18n.translate(self._language(), text, **values)
+
+    async def get_steam_language(self) -> str:
+        """Steam's language as a supported code ("" when unknown or not translated)."""
+        i18n = self._i18n()
+        if i18n is None:
+            return ""
+        return i18n.language_from_steam(i18n.read_steam_registry_name(self._user_homes())) or ""
+
+    async def set_detected_language(self, code: str = "") -> None:
+        """The panel's reading of Steam's language, kept for the popup renderer."""
+        i18n = self._i18n()
+        value = code if (i18n is not None and code in i18n.SUPPORTED) else ""
+        try:
+            os.makedirs(FINALLY_SETTINGS_DIR, exist_ok=True)
+            with open(self._detected_language_path(), "w", encoding="utf-8") as stream:
+                stream.write(value)
+        except OSError as err:
+            decky.logger.warning("Couldn't save the detected language: %s", err)
+
+    def _fonts_dir(self) -> str:
+        return os.path.join(FINALLY_SETTINGS_DIR, "fonts")
+
+    def _cjk_font_dirs(self) -> List[str]:
+        """Extra folders searched for a Chinese font: yours, and Steam's own font folders."""
+        roots = [os.path.join(h, ".local/share/Steam") for h in self._user_homes()]
+        dirs = [self._fonts_dir()]
+        for root in roots:
+            for sub in ("steamui/fonts", "clientui/fonts", "resource/fonts"):
+                dirs.append(os.path.join(root, sub))
+        return [d for d in dirs if os.path.isdir(d)]
+
+    def _fontconfig_env(self) -> Dict[str, str]:
+        """FONTCONFIG_FILE adding those folders to the system fonts. Only used for
+        Simplified Chinese; nothing changes for the other languages."""
+        dirs = self._cjk_font_dirs()
+        if not dirs:
+            return {}
+        try:
+            os.makedirs(self._settings_dir(), exist_ok=True)
+            path = os.path.join(self._settings_dir(), "fonts.conf")
+            body = (
+                '<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig>\n'
+                '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>\n'
+                + "".join(f"  <dir>{d}</dir>\n" for d in dirs)
+                + f'  <cachedir>{os.path.join(self._settings_dir(), "fontcache")}</cachedir>\n</fontconfig>\n'
+            )
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write(body)
+            return {"FONTCONFIG_FILE": path}
+        except OSError:
+            return {}
+
+    async def get_language_info(self) -> Dict[str, Any]:
+        """What language is in use, and (for Chinese) whether a Chinese font exists."""
+        language = self._language()
+        info: Dict[str, Any] = {
+            "language": language,
+            "steam_language": self._steam_language_name(),
+            "fonts_folder": self._fonts_dir(),
+            "cjk_font": None,
+            "cjk_checked": False,
+        }
+        if language == "zh-Hans":
+            os.makedirs(self._fonts_dir(), exist_ok=True)
+            env = os.environ.copy()
+            env.pop("LD_LIBRARY_PATH", None)
+            env.pop("LD_PRELOAD", None)
+            env.update(self._fontconfig_env())
+            try:
+                result = await asyncio.to_thread(
+                    subprocess.run, ["fc-list", ":lang=zh-cn", "family"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, timeout=8, check=False,
+                )
+                names = [line.split(",")[0].strip() for line in (result.stdout or "").splitlines() if line.strip()]
+                info["cjk_checked"] = True
+                info["cjk_font"] = names[0] if names else None
+            except Exception as err:  # noqa: BLE001
+                decky.logger.warning("Font check failed: %s", err)
+        return info
+
+    def _screen_env(self, override: Optional[str] = None) -> Dict[str, str]:
+        """FINALLY_WIDTH/HEIGHT for the overlay helpers, or nothing for "auto"."""
+        choice = (override or self._load_settings().get("overlay_screen") or "auto").strip().lower()
+        if choice not in SCREEN_SIZE_CHOICES or choice == "auto":
+            return {}
+        width, height = choice.split("x")
+        return {"FINALLY_WIDTH": width, "FINALLY_HEIGHT": height}
+
+    async def show_screen_frame(self, size: str = "") -> None:
+        """Draws a bright frame around the popup canvas (no sound) so you can
+        see whether it matches the real screen edges. `size` is a choice from
+        SCREEN_SIZE_CHOICES, tried without saving it."""
+        choice = (size or "").strip().lower()
+        if choice not in SCREEN_SIZE_CHOICES:
+            choice = ""
+        payload = {
+            "title": "Screen size test",
+            "subtitle": choice or "auto",
+            "is_rare": False,
+            "percent": None,
+            "settings_appid": None,
+            "test_frame": True,
+            "screen_override": choice,
+            "min_seconds": 6.0,
+        }
+        asyncio.create_task(self._show_gamescope_overlay(payload))
 
     async def _show_gamescope_overlay(self, payload: Dict[str, Any]) -> None:
         helper_path = os.path.join(decky.DECKY_PLUGIN_DIR, FINALLY_OVERLAY_HELPER_NAME)
@@ -2556,7 +3137,7 @@ class Plugin:
             # the first item's sound) actually made it to the screen/speakers.
             # The tracker starts sliding away while the sound's lead-in plays.
             hide_task = asyncio.create_task(self._tracker_hide_for_toast())
-            played = await self._play_sound(
+            played = None if payload.get("test_frame") else await self._play_sound(
                 bool(payload.get("is_rare")),
                 settings,
                 tier=payload.get("tier"),
@@ -2581,6 +3162,10 @@ class Plugin:
             env.update(
                 {
                     **self._overlay_session_env(),
+                    **self._screen_env(payload.get("screen_override") or None),
+                    "FINALLY_LANG": self._language(),
+                    **(self._fontconfig_env() if self._language() == "zh-Hans" else {}),
+                    "FINALLY_TEST_FRAME": "1" if payload.get("test_frame") else "0",
                     "FINALLY_TITLE": str(payload.get("title") or "Achievement Unlocked"),
                     "FINALLY_SUBTITLE": str(payload.get("subtitle") or ""),
                     "FINALLY_RARE": "1" if payload.get("is_rare") else "0",
@@ -2682,6 +3267,8 @@ class Plugin:
                     )
                     stdout, stderr = await process.communicate()
                     if process.returncode == 0:
+                        if stderr:
+                            decky.logger.info("Popup overlay: %s", stderr.decode("utf-8", errors="replace").strip()[-300:])
                         self._gamescope_overlay_status = "shown"
                         self._gamescope_overlay_last_error = None
                         self._overlay_display = display
@@ -2773,6 +3360,23 @@ class Plugin:
         if not isinstance(percent, (int, float)) and appid is not None and achievement_id:
             percent_task = asyncio.create_task(self._lookup_percent(appid, achievement_id))
 
+        # No description (a fallback detection path, or a secret achievement)?
+        # Ask Steam for it while the icon is being fetched; capped so a game
+        # that really has none only costs a moment, once.
+        desc_task = None
+        if not test and appid is not None and achievement_id and not str(subtitle or "").strip():
+            # Steam's local schema has the text for every achievement, secret ones too: no waiting needed.
+            try:
+                _local_name, local_desc = await asyncio.to_thread(self._local_achievement_text, appid, achievement_id)
+            except Exception:
+                local_desc = ""
+            if local_desc:
+                subtitle = local_desc
+        if not test and appid is not None and achievement_id and not str(subtitle or "").strip():
+            desc_task = asyncio.create_task(
+                asyncio.wait_for(self._describe_achievement(appid, achievement_id), DESCRIPTION_LOOKUP_SECONDS)
+            )
+
         # Game-art palette source (only when chosen and the gradient is on):
         # fetched concurrently with the icon so it adds no delay.
         # Settings come from the game's profile if it has one on. Test popups
@@ -2858,6 +3462,14 @@ class Plugin:
             except Exception:
                 percent = None
 
+        if desc_task is not None:
+            try:
+                found = await desc_task
+                if found:
+                    subtitle = found
+            except Exception:
+                pass
+
         # Rarity tier from the final percentage and the user's cutoffs. When
         # known it decides "rare" styling too, so the label, gold look and
         # rare sound always agree with the cutoffs (at the defaults this is
@@ -2890,6 +3502,12 @@ class Plugin:
             "game_art_path": game_art_path,
             "settings_appid": settings_appid,
         }
+
+        if not test:
+            try:
+                self._record_unlock(payload)
+            except Exception as err:
+                decky.logger.warning("Unlock history skipped: %s", err)
 
         asyncio.create_task(self._show_gamescope_overlay(payload))
         await decky.emit("finally_show", payload)
@@ -3262,9 +3880,10 @@ class Plugin:
             self._steamworks_status = "disabled_helper_missing"
             self._steamworks_running = False
             return
-        if not os.path.exists(STEAMWORKS_LIB_PATH):
+        lib_path = self._steamworks_lib_path()
+        if not os.path.exists(lib_path):
             self._steamworks_status = "disabled_lib_missing"
-            self._steamworks_last_error = STEAMWORKS_LIB_PATH
+            self._steamworks_last_error = lib_path
             self._steamworks_running = False
             return
 
@@ -3272,7 +3891,7 @@ class Plugin:
         env["SteamAppId"] = str(appid)
         env["SteamGameId"] = str(appid)
         env["LD_LIBRARY_PATH"] = (
-            os.path.dirname(STEAMWORKS_LIB_PATH)
+            os.path.dirname(lib_path)
             + os.pathsep
             + env.get("LD_LIBRARY_PATH", "")
         )
@@ -3285,7 +3904,9 @@ class Plugin:
             "--poll-ms",
             str(STEAMWORKS_POLL_INTERVAL_MS),
             "--lib",
-            STEAMWORKS_LIB_PATH,
+            lib_path,
+            "--refresh-ms",
+            str(STEAMWORKS_REFRESH_INTERVAL_MS),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -3384,14 +4005,21 @@ class Plugin:
             # the race to show this unlock's regular toast.
             if self._is_game_complete(event):
                 self._schedule_completion_toast(appid)
+            else:
+                self._maybe_near_completion(appid, event)
 
     async def _watch_steamworks(self) -> None:
         active_appid: Optional[int] = None
+        none_since: Optional[float] = None
 
         while not self._stop_event.is_set():
             try:
                 detected = await asyncio.to_thread(self._detect_running_steam_appid)
                 if detected is None:
+                    if none_since is None:
+                        none_since = time.monotonic()
+                    elif time.monotonic() - none_since >= SESSION_END_SECONDS:
+                        self._end_session()
                     if active_appid is not None:
                         self._stop_steamworks_process()
                     active_appid = None
@@ -3400,6 +4028,9 @@ class Plugin:
                     self._steamworks_status = "idle_no_running_game"
                 else:
                     appid, _start_ticks = detected
+                    none_since = None
+                    if self._session is not None and self._session.get("appid") != appid:
+                        self._end_session()
                     self._active_appid = appid
                     self._game_name(appid)  # warms the name (local now, store in background)
                     process = self._steamworks_process
@@ -3586,7 +4217,7 @@ class Plugin:
 
         payload = await self._steam_api_json(
             "/ISteamUserStats/GetSchemaForGame/v2/",
-            {"key": key, "appid": appid, "l": "english", "format": "json"},
+            {"key": key, "appid": appid, "l": self._steam_l_param(), "format": "json"},
         )
         achievements = (
             payload.get("game", {}).get("availableGameStats", {}).get("achievements", [])
@@ -3669,6 +4300,164 @@ class Plugin:
             return urls[achievement_id]
         lowered = achievement_id.lower()
         return next((u for n, u in urls.items() if n.lower() == lowered), None)
+
+    # ------------------------------------------------------------------
+    # Local stats files: instant unlock detection and descriptions
+    # ------------------------------------------------------------------
+
+    def _stats_dirs(self) -> List[str]:
+        dirs = []
+        for root in self._steam_roots():
+            path = os.path.join(root, "appcache", "stats")
+            if os.path.isdir(path):
+                dirs.append(path)
+        return dirs
+
+    def _local_stats_schema(self, appid: int) -> Dict[str, Any]:
+        """From appcache/stats/UserGameStatsSchema_<appid>.bin: {"by_bit": {(statid, bit): id}, "by_id": {id: {...}}} where each
+        entry has "names" and "descs" (language -> text, as Steam spells the languages) and "hidden". Cached until the file changes."""
+        for path in self._schema_stats_files(appid):
+            try:
+                stamp = os.stat(path).st_mtime_ns
+                cached = self._stats_schema_cache.get(path)
+                if cached is not None and cached[0] == stamp:
+                    return cached[1]
+                with open(path, "rb") as stream:
+                    parsed, _ = _vdf_parse(stream.read(), 0)
+            except Exception as err:
+                decky.logger.warning("Local stats schema unreadable (%s): %s", path, err)
+                continue
+            by_bit: Dict[Tuple[str, str], str] = {}
+            by_id: Dict[str, Dict[str, Any]] = {}
+            top = parsed.get(str(appid)) if isinstance(parsed.get(str(appid)), dict) else next(
+                (v for v in parsed.values() if isinstance(v, dict) and "stats" in v), {})
+            stats = top.get("stats") if isinstance(top, dict) else None
+            for stat_id, stat in (stats or {}).items():
+                bits = stat.get("bits") if isinstance(stat, dict) else None
+                if not isinstance(bits, dict):
+                    continue
+                for bit, node in bits.items():
+                    if not isinstance(node, dict) or not isinstance(node.get("name"), str):
+                        continue
+                    display = node.get("display") if isinstance(node.get("display"), dict) else {}
+                    def langs(value: Any) -> Dict[str, str]:
+                        return {k: v for k, v in value.items() if isinstance(v, str) and k != "token"} if isinstance(value, dict) else {}
+                    by_bit[(str(stat_id), str(bit))] = node["name"]
+                    by_id[node["name"]] = {
+                        "names": langs(display.get("name")),
+                        "descs": langs(display.get("desc")),
+                        "hidden": str(display.get("hidden", "0")) in ("1", "true"),
+                    }
+            result = {"by_bit": by_bit, "by_id": by_id}
+            self._stats_schema_cache[path] = (stamp, result)
+            return result
+        return {"by_bit": {}, "by_id": {}}
+
+    def _local_achievement_text(self, appid: int, achievement_id: str) -> Tuple[str, str]:
+        """(name, description) of an achievement in Steam's language, from Steam's local schema; ("", "") when it isn't there."""
+        entry = self._local_stats_schema(appid)["by_id"].get(achievement_id)
+        if entry is None:
+            lowered = achievement_id.lower()
+            entry = next((v for k, v in self._local_stats_schema(appid)["by_id"].items() if k.lower() == lowered), None)
+        if entry is None:
+            return "", ""
+        language = self._steam_language_name() or "english"
+        def pick(texts: Dict[str, str]) -> str:
+            return (texts.get(language) or texts.get("english") or next(iter(texts.values()), "")).strip()
+        return pick(entry["names"]), pick(entry["descs"])
+
+    def _stats_bin_unlocks(self, appid: int, path: str) -> Optional[Dict[str, int]]:
+        """{achievement id: unlock time} from Steam's UserGameStats file for this game, or None if it can't be read right now."""
+        try:
+            with open(path, "rb") as stream:
+                tree, _ = _vdf_parse(stream.read(), 0)
+        except Exception:
+            return None
+        schema = self._local_stats_schema(appid)["by_bit"]
+        cache = tree.get("cache") if isinstance(tree.get("cache"), dict) else {}
+        unlocked: Dict[str, int] = {}
+        for stat_id, node in cache.items():
+            times = node.get("AchievementTimes") if isinstance(node, dict) else None
+            if not isinstance(times, dict):
+                continue
+            for bit, stamp in times.items():
+                ach_id = schema.get((str(stat_id), str(bit)))
+                if ach_id and isinstance(stamp, int) and stamp > 0:
+                    unlocked[ach_id] = stamp
+        return unlocked
+
+    async def _process_stats_bin(self, path: str, appid: int, source: str = "stats_bin") -> None:
+        unlocked = None
+        for attempt in range(3):                 # Steam may still be writing the file
+            unlocked = await asyncio.to_thread(self._stats_bin_unlocks, appid, path)
+            if unlocked is not None:
+                break
+            await asyncio.sleep(0.15 * (attempt + 1))
+        if unlocked is None:
+            self._stats_bin_status = f"appid={appid}: unreadable"
+            return
+        previous = self._stats_known.get(path)
+        self._stats_known[path] = set(unlocked)
+        now = time.time()
+        if previous is None:
+            new_ids = [i for i, stamp in unlocked.items() if stamp >= now - STATS_BIN_NEW_WINDOW_SECONDS]
+        else:
+            new_ids = [i for i in unlocked if i not in previous]
+        if not new_ids:
+            self._stats_bin_status = f"appid={appid}: no_new_unlocks"
+            return
+        for ach_id in sorted(new_ids, key=lambda i: unlocked[i]):
+            name, desc = await asyncio.to_thread(self._local_achievement_text, appid, ach_id)
+            icon_url = self._local_schema_icon_url(appid, ach_id) or self._achievement_icon_from_cache(appid, ach_id)
+            self._stats_bin_status = f"appid={appid}: new_unlock {ach_id}"
+            self._stats_bin_unlock_count += 1
+            await self._emit_notification(
+                title=name or ach_id,
+                subtitle=desc,
+                is_rare=False,
+                line_hint=f"appid={appid} id={ach_id} name={name or ach_id}",
+                source=source,
+                dedupe_key=f"achievement:{appid}:{ach_id}",
+                appid=appid,
+                achievement_id=ach_id,
+                icon_url=icon_url,
+            )
+
+    async def _watch_stats_bin(self) -> None:
+        """Looks for changes of Steam's UserGameStats files once a second (a directory listing: cheap) and reads the one
+        that changed. This is how an unlock is noticed within a second or two on setups where the library data and the
+        game's Steamworks stats are slow to update."""
+        pattern = self._stats_bin_pattern
+        first = True
+        while not self._stop_event.is_set():
+            try:
+                for directory in self._stats_dirs():
+                    try:
+                        entries = list(os.scandir(directory))
+                    except OSError:
+                        continue
+                    for entry in entries:
+                        match = pattern.match(entry.name)
+                        if not match:
+                            continue
+                        try:
+                            stamp = entry.stat().st_mtime_ns
+                        except OSError:
+                            continue
+                        previous = self._stats_mtimes.get(entry.path)
+                        self._stats_mtimes[entry.path] = stamp
+                        if first or previous is None or stamp == previous:
+                            continue
+                        await self._process_stats_bin(entry.path, int(match.group("appid")))
+                first = False
+                if self._stats_bin_status == "not_started":
+                    self._stats_bin_status = "watching"
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._stats_bin_status = f"error: {err}"
+                decky.logger.warning("Stats file watcher error: %s", err)
+            await asyncio.sleep(STATS_BIN_SCAN_INTERVAL_SECONDS)
 
     async def _resolve_authoritative_icon_url(
         self, appid: Optional[int], achievement_id: Optional[str], fallback_icon_url: Optional[str]
@@ -3853,7 +4642,7 @@ class Plugin:
         env.pop("LD_PRELOAD", None)
         result = subprocess.run(
             ["curl", "--fail", "--silent", "--show-error", "--location", "--max-time", "4",
-             "--user-agent", "FinallyAchievementPlugin/1.0", STEAM_COMMUNITY_STATS_URL.format(appid=appid)],
+             "--user-agent", "FinallyAchievementPlugin/1.0", STEAM_COMMUNITY_STATS_URL.format(appid=appid, lang=self._steam_l_param())],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False,
         )
         if result.returncode != 0:
@@ -3974,7 +4763,7 @@ class Plugin:
                 "key": key,
                 "steamid": steamid64,
                 "appid": appid,
-                "l": "english",
+                "l": self._steam_l_param(),
                 "format": "json",
             },
         )

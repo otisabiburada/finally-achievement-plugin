@@ -18,6 +18,18 @@ import {
   staticClasses,
 } from "@decky/ui";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { HistoryView } from "./historyView";
+import {
+  LANGUAGE_OPTIONS,
+  detectSteamLanguage,
+  formatDecimal,
+  languageFromSteam,
+  setLanguage,
+  t,
+  tOpts,
+  type LangCode,
+  type LanguageSetting,
+} from "./i18n";
 import { FaMapPin, FaRegCircle, FaSteam, FaSyncAlt, FaTrophy } from "react-icons/fa";
 import {
   DEFAULT_SETTINGS,
@@ -27,6 +39,7 @@ import {
   GLOW_INTENSITY_RANGE,
   GRADIENT_DIRECTION_OPTIONS,
   OVERLAY_POSITION_OPTIONS,
+  OVERLAY_SCREEN_OPTIONS,
   PLACEHOLDER_ICON_OPTIONS,
   COMPLETION_TITLE_OPTIONS,
   SOUND_SLOT_OPTIONS,
@@ -45,6 +58,7 @@ import {
   type GradientDirection,
   type NotificationPayload,
   type OverlayPosition,
+  type OverlayScreen,
   type OverlayTemplate,
   type PlaceholderIcon,
   type CompletionTitle,
@@ -62,6 +76,14 @@ import {
   TRACKER_SIZE_RANGE,
   friendlyError,
 } from "./achievementsTypes";
+
+type LanguageInfo = {
+  language: string;
+  steam_language: string | null;
+  fonts_folder: string;
+  cjk_font: string | null;
+  cjk_checked: boolean;
+};
 
 type ApiKeyStatus = {
   configured: boolean;
@@ -99,7 +121,8 @@ const ICON_RESOLUTION_LABELS: Record<string, string> = {
 
 function describeIconResolution(diagnostic: IconResolutionDiagnostic): string {
   const code = diagnostic.result.split(":")[0];
-  return ICON_RESOLUTION_LABELS[code] ?? diagnostic.result;
+  const label = ICON_RESOLUTION_LABELS[code];
+  return label ? t(label) : diagnostic.result;
 }
 
 type GameProfileInfo = {
@@ -198,7 +221,7 @@ const toErrorMessage = (value: unknown): string => {
 
 const formatTimestamp = (value: string | null): string => {
   if (!value) {
-    return "never";
+    return t("never");
   }
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) {
@@ -216,7 +239,7 @@ const TRACKER_REFRESH_INTERVAL_MS = 5000;
 
 type SortDropdownSelection = { data: SortMode };
 type PositionDropdownSelection = { data: TrackerPosition };
-type PanelView = "popup" | "style" | "sound" | "achievements" | "advanced";
+type PanelView = "popup" | "style" | "sound" | "achievements" | "history" | "advanced";
 type ViewDropdownSelection = { data: PanelView };
 
 const VIEW_OPTIONS: { data: PanelView; label: string }[] = [
@@ -224,6 +247,7 @@ const VIEW_OPTIONS: { data: PanelView; label: string }[] = [
   { data: "style", label: "Colors & style" },
   { data: "sound", label: "Sound & tests" },
   { data: "achievements", label: "Achievements & tracker" },
+  { data: "history", label: "History & sharing" },
   { data: "advanced", label: "Advanced" },
 ];
 
@@ -235,8 +259,8 @@ function formatUnlockTime(unixSeconds: number): string {
 
 function formatRarity(percent: number | null): string {
   if (percent === null || percent === undefined) return "";
-  if (percent < 0.1) return "<0.1% of players";
-  return `${percent.toFixed(1)}% of players`;
+  if (percent < 0.1) return t("<0.1% of players");
+  return t("{percent}% of players", { percent: formatDecimal(percent.toFixed(1)) });
 }
 
 // Case-insensitive search over name and description. Every word typed has to
@@ -388,7 +412,7 @@ function ProgressSummary({ data }: { data: AchievementsResponse }) {
     <div style={{ marginBottom: 8 }}>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
         <span>
-          {unlocked} / {total} unlocked
+          {t("{unlocked} / {total} unlocked", { unlocked, total })}
         </span>
         <span>{percent}%</span>
       </div>
@@ -410,12 +434,12 @@ function TrackerSummary({ tracked, onStop }: { tracked: TrackedResponse; onStop:
   const target = tracked.target;
   const state = tracked.state;
   if (!target) return null;
-  let statusText = "Waiting for live data...";
+  let statusText = t("Waiting for live data...");
   if (state) {
-    if (state.achieved) statusText = "\u2713 Unlocked";
+    if (state.achieved) statusText = t("\u2713 Unlocked");
     else if (state.has_progress && state.max) statusText = `${state.current ?? 0} / ${state.max}`;
     else if (typeof state.percent === "number") statusText = formatRarity(state.percent);
-    else statusText = "In progress";
+    else statusText = t("In progress");
   }
   return (
     <>
@@ -432,7 +456,7 @@ function TrackerSummary({ tracked, onStop }: { tracked: TrackedResponse; onStop:
       </PanelSectionRow>
       <PanelSectionRow>
         <ButtonItem layout="below" onClick={onStop}>
-          Stop tracking
+          {t("Stop tracking")}
         </ButtonItem>
       </PanelSectionRow>
     </>
@@ -530,24 +554,24 @@ function AchievementsView({
 
   return (
     <>
-      <PanelSection title="Currently Playing">
+      <PanelSection title={t("Currently Playing")}>
         <PanelSectionRow>
           <div style={{ fontSize: 14, fontWeight: 600 }}>
-            {game?.name ?? (game?.appid ? `App ${game.appid}` : "No game running")}
+            {game?.name ?? (game?.appid ? t("App {id}", { id: game.appid }) : t("No game running"))}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => void load()}>
             <FaSyncAlt style={{ marginRight: 6 }} />
-            {loading ? "Refreshing..." : "Refresh"}
+            {loading ? t("Refreshing...") : t("Refresh")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
-      <PanelSection title="Achievements">
+      <PanelSection title={t("Achievements")}>
         {!data || (loading && !data.achievements.length) ? (
           <PanelSectionRow>
-            <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>Loading achievements...</div>
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{t("Loading achievements...")}</div>
           </PanelSectionRow>
         ) : !data.ok ? (
           <PanelSectionRow>
@@ -555,7 +579,7 @@ function AchievementsView({
           </PanelSectionRow>
         ) : data.achievements.length === 0 ? (
           <PanelSectionRow>
-            <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>No achievements found for this game.</div>
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{t("No achievements found for this game.")}</div>
           </PanelSectionRow>
         ) : (
           <>
@@ -564,8 +588,8 @@ function AchievementsView({
             </PanelSectionRow>
             <PanelSectionRow>
               <TextField
-                label="Search"
-                description="Type part of a name or description."
+                label={t("Search")}
+                description={t("Type part of a name or description.")}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
               />
@@ -573,14 +597,14 @@ function AchievementsView({
             {searching && (
               <PanelSectionRow>
                 <ButtonItem layout="below" onClick={() => setQuery("")}>
-                  Clear search
+                  {t("Clear search")}
                 </ButtonItem>
               </PanelSectionRow>
             )}
             <PanelSectionRow>
               <DropdownItem
-                label="Sort by"
-                rgOptions={SORT_OPTIONS}
+                label={t("Sort by")}
+                rgOptions={tOpts(SORT_OPTIONS)}
                 selectedOption={sortMode}
                 onChange={(selection: SortDropdownSelection) => setSortMode(selection.data)}
               />
@@ -589,8 +613,8 @@ function AchievementsView({
               <PanelSectionRow>
                 <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>
                   {sorted.length === 0
-                    ? "No achievements match your search."
-                    : `Showing ${sorted.length} of ${data.achievements.length}`}
+                    ? t("No achievements match your search.")
+                    : t("Showing {shown} of {total}", { shown: sorted.length, total: data.achievements.length })}
                 </div>
               </PanelSectionRow>
             )}
@@ -610,26 +634,23 @@ function AchievementsView({
         )}
       </PanelSection>
 
-      <PanelSection title="Achievement Tracker">
+      <PanelSection title={t("Achievement Tracker")}>
         <PanelSectionRow>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.6)" }}>
-            Select an achievement above (press the action button on it) to pin it as a small on-screen tracker while
-            you play. The tracker uses your toast template and colors, and slides away while a popup shows. Numeric
-            progress only appears for achievements the game links to a trackable stat; others show locked or
-            unlocked.
+            {t("Select an achievement above (press the action button on it) to pin it as a small on-screen tracker while you play. The tracker uses your toast template and colors, and slides away while a popup shows. Numeric progress only appears for achievements the game links to a trackable stat; others show locked or unlocked.")}
           </div>
         </PanelSectionRow>
         {tracked.tracked && tracked.target ? (
           <TrackerSummary tracked={tracked} onStop={handleStopTracking} />
         ) : (
           <PanelSectionRow>
-            <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>Nothing pinned right now.</div>
+            <div style={{ fontSize: 13, color: "rgba(255,255,255,0.6)" }}>{t("Nothing pinned right now.")}</div>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
           <DropdownItem
-            label="Tracker position"
-            rgOptions={TRACKER_POSITION_OPTIONS}
+            label={t("Tracker position")}
+            rgOptions={tOpts(TRACKER_POSITION_OPTIONS)}
             selectedOption={settings.tracker_position}
             disabled={busy}
             onChange={(selection: PositionDropdownSelection) =>
@@ -639,9 +660,9 @@ function AchievementsView({
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Tracker template"
-            description="Which popup template the tracker is drawn with. Try Game Art Blur to put the game's artwork behind it."
-            rgOptions={TRACKER_TEMPLATE_OPTIONS}
+            label={t("Tracker template")}
+            description={t("Which popup template the tracker is drawn with. Try Game Art Blur to put the game's artwork behind it.")}
+            rgOptions={tOpts(TRACKER_TEMPLATE_OPTIONS)}
             selectedOption={settings.tracker_template}
             disabled={busy}
             onChange={(selection: { data: TrackerTemplate }) =>
@@ -651,7 +672,7 @@ function AchievementsView({
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Tracker size"
+            label={t("Tracker size")}
             value={settings.tracker_size_percent}
             min={TRACKER_SIZE_RANGE.min}
             max={TRACKER_SIZE_RANGE.max}
@@ -678,6 +699,8 @@ function StatusPanel() {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [profileOverride, setProfileOverride] = useState<GameProfileInfo | null>(null);
   const [view, setView] = useState<PanelView>("popup");
+  const [steamLang, setSteamLang] = useState<LangCode | null>(null);
+  const [langInfo, setLangInfo] = useState<LanguageInfo | null>(null);
   const [overlayCheck, setOverlayCheck] = useState<OverlayCheckResult | null>(null);
   const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>({
     configured: false,
@@ -747,6 +770,9 @@ function StatusPanel() {
 
     void refreshStatus();
     void refreshSettings();
+    void call<[], string>("get_steam_language")
+      .then((code) => setSteamLang(languageFromSteam(code)))
+      .catch(() => undefined);
     void refreshApiKeyStatus();
     void refreshIconDiagnostic();
     const interval = window.setInterval(() => {
@@ -759,6 +785,29 @@ function StatusPanel() {
       removeEventListener(EVENT_NAME, listener);
     };
   }, [refreshSettings, refreshStatus, refreshApiKeyStatus, refreshIconDiagnostic]);
+
+  // The panel's language: your choice, or Steam's language when set to Auto.
+  // Applied while rendering so every label below already uses it.
+  const chosenLanguage: LangCode =
+    settings.language === "auto"
+      ? (detectSteamLanguage() ?? steamLang ?? "en")
+      : (settings.language as LangCode);
+  setLanguage(chosenLanguage);
+
+  // Tell the backend which language Steam is using (the popups follow it on
+  // Auto), and for Chinese check that a Chinese font exists for the popups.
+  useEffect(() => {
+    void call<[string], void>("set_detected_language", detectSteamLanguage() ?? "").catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (chosenLanguage !== "zh-Hans") {
+      setLangInfo(null);
+      return;
+    }
+    void call<[], LanguageInfo>("get_language_info")
+      .then((info) => setLangInfo(info))
+      .catch(() => undefined);
+  }, [chosenLanguage, settings.language]);
 
   const gameProfile: GameProfileInfo = profileOverride ??
     status?.game_profile ?? { available: false, appid: null, name: "", enabled: false };
@@ -790,7 +839,7 @@ function StatusPanel() {
     } catch (error) {
       setOverlayCheck({
         ok: false,
-        verdict: `The check itself failed: ${toErrorMessage(error)}`,
+        verdict: t("The check itself failed: {error}", { error: toErrorMessage(error) }),
         checks: [],
         last_status: "",
         last_error: null,
@@ -825,9 +874,9 @@ function StatusPanel() {
       setApiKeyStatus({ configured: result.configured, masked: result.masked });
       if (result.ok) {
         setApiKeyInput("");
-        setApiKeyMessage("Saved.");
+        setApiKeyMessage(t("Saved."));
       } else {
-        setApiKeyMessage(result.error ?? "Couldn't save that key.");
+        setApiKeyMessage(result.error ?? t("Couldn't save that key."));
       }
     } catch (error) {
       setApiKeyMessage(toErrorMessage(error));
@@ -842,7 +891,7 @@ function StatusPanel() {
     try {
       const result = await call<[], ApiKeySaveResult>("clear_steam_web_api_key");
       setApiKeyStatus({ configured: result.configured, masked: result.masked });
-      setApiKeyMessage("Removed.");
+      setApiKeyMessage(t("Removed."));
     } catch (error) {
       setApiKeyMessage(toErrorMessage(error));
     } finally {
@@ -890,7 +939,9 @@ function StatusPanel() {
   );
 
   const colorsLocked = settings.template_colors_enabled;
-  const colorButton = (key: ColorSettingKey, label: string) => (
+  const colorButton = (key: ColorSettingKey, rawLabel: string) => {
+    const label = t(rawLabel);
+    return (
     <ButtonItem
       disabled={pendingAction !== null || colorsLocked}
       onClick={() => openColorPicker(key, label)}
@@ -911,11 +962,12 @@ function StatusPanel() {
         />
       </div>
     </ButtonItem>
-  );
+    );
+  };
 
   const soundOptions = sounds.map((sound) => ({
     data: sound.name,
-    label: sound.source === "user" ? `${sound.name} (yours)` : sound.name,
+    label: sound.source === "user" ? `${sound.name} ${t("(yours)")}` : sound.name,
   }));
 
   const trigger = useCallback(
@@ -940,19 +992,37 @@ function StatusPanel() {
 
   return (
     <>
-      <PanelSection title="Finally Achievement Plugin">
+      <PanelSection title={t("Finally Achievement Plugin")}>
         <PanelSectionRow>
           <DropdownItem
-            label="Show"
-            rgOptions={VIEW_OPTIONS}
+            label={t("Show")}
+            rgOptions={tOpts(VIEW_OPTIONS)}
             selectedOption={view}
             onChange={(selection: ViewDropdownSelection) => setView(selection.data)}
           />
         </PanelSectionRow>
-        {view !== "achievements" && view !== "popup" && gameProfile.available && gameProfile.enabled && (
+        <PanelSectionRow>
+          <DropdownItem
+            label={t("Language")}
+            rgOptions={tOpts(LANGUAGE_OPTIONS)}
+            selectedOption={settings.language}
+            disabled={pendingAction !== null}
+            onChange={(selection: { data: LanguageSetting }) =>
+              void updateSettings({ language: selection.data })
+            }
+          />
+        </PanelSectionRow>
+        {chosenLanguage === "zh-Hans" && langInfo && langInfo.cjk_checked && !langInfo.cjk_font && (
           <PanelSectionRow>
             <div style={{ fontSize: "12px", opacity: 0.8 }}>
-              Editing settings for {gameProfile.name} only.
+              {t("No Chinese font was found, so Chinese popup text may show as empty boxes. Copy a font file (.ttf, .otf or .ttc, for example Noto Sans SC) into {folder} and run a test popup.", { folder: langInfo.fonts_folder })}
+            </div>
+          </PanelSectionRow>
+        )}
+        {view !== "achievements" && view !== "popup" && view !== "history" && gameProfile.available && gameProfile.enabled && (
+          <PanelSectionRow>
+            <div style={{ fontSize: "12px", opacity: 0.8 }}>
+              {t("Editing settings for {name} only.", { name: gameProfile.name })}
             </div>
           </PanelSectionRow>
         )}
@@ -966,20 +1036,28 @@ function StatusPanel() {
         />
       )}
 
+      {view === "history" && (
+        <HistoryView
+          settings={settings}
+          updateSettings={updateSettings}
+          busy={pendingAction !== null}
+        />
+      )}
+
       {view === "popup" && (
         <>
-      <PanelSection title="Game Settings">
+      <PanelSection title={t("Game Settings")}>
         <PanelSectionRow>
           <ToggleField
             label={
               gameProfile.available
-                ? `Custom settings for ${gameProfile.name}`
-                : "Custom settings for this game"
+                ? t("Custom settings for {name}", { name: gameProfile.name })
+                : t("Custom settings for this game")
             }
             description={
               gameProfile.available
-                ? "When on, every setting below applies only to this game and is saved for next time. It starts as a copy of your current settings. Turning it off keeps what you saved."
-                : "Start a game, then open this panel to give it its own settings. Right now the settings below apply to all games."
+                ? t("When on, every setting below applies only to this game and is saved for next time. It starts as a copy of your current settings. Turning it off keeps what you saved.")
+                : t("Start a game, then open this panel to give it its own settings. Right now the settings below apply to all games.")
             }
             checked={gameProfile.enabled}
             disabled={pendingAction !== null || !gameProfile.available}
@@ -989,8 +1067,8 @@ function StatusPanel() {
         <PanelSectionRow>
           <div style={{ fontSize: "12px", opacity: 0.8 }}>
             {gameProfile.available && gameProfile.enabled
-              ? `Editing settings for ${gameProfile.name} only.`
-              : "Editing settings for all games."}
+              ? t("Editing settings for {name} only.", { name: gameProfile.name })
+              : t("Editing settings for all games.")}
           </div>
         </PanelSectionRow>
         {gameProfile.available && gameProfile.enabled && (
@@ -1000,17 +1078,17 @@ function StatusPanel() {
               disabled={pendingAction !== null}
               onClick={() => void handleProfileReset()}
             >
-              Reset this game to the global settings
+              {t("Reset this game to the global settings")}
             </ButtonItem>
           </PanelSectionRow>
         )}
       </PanelSection>
-      <PanelSection title="Appearance">
+      <PanelSection title={t("Appearance")}>
         <PanelSectionRow>
           <DropdownItem
-            label="Popup template"
-            description="The overall card design/style."
-            rgOptions={OVERLAY_TEMPLATE_OPTIONS}
+            label={t("Popup template")}
+            description={t("The overall card design/style.")}
+            rgOptions={tOpts(OVERLAY_TEMPLATE_OPTIONS)}
             selectedOption={settings.overlay_template}
             disabled={pendingAction !== null}
             onChange={(selection: { data: OverlayTemplate }) =>
@@ -1020,9 +1098,9 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Popup position"
-            description="Where the banner appears on screen."
-            rgOptions={OVERLAY_POSITION_OPTIONS}
+            label={t("Popup position")}
+            description={t("Where the banner appears on screen.")}
+            rgOptions={tOpts(OVERLAY_POSITION_OPTIONS)}
             selectedOption={settings.overlay_position}
             disabled={pendingAction !== null}
             onChange={(selection: { data: OverlayPosition }) =>
@@ -1031,9 +1109,31 @@ function StatusPanel() {
           />
         </PanelSectionRow>
         <PanelSectionRow>
+          <DropdownItem
+            label={t("Popup screen size")}
+            description={t("Auto is right on the Deck's own screen. On a TV, if popups land in the wrong place, pick the TV's resolution and check it with the frame test below.")}
+            rgOptions={tOpts(OVERLAY_SCREEN_OPTIONS)}
+            selectedOption={settings.overlay_screen}
+            disabled={pendingAction !== null}
+            onChange={(selection: { data: OverlayScreen }) =>
+              void updateSettings({ overlay_screen: selection.data })
+            }
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={pendingAction !== null}
+            onClick={() => void call<[string], void>("show_screen_frame", settings.overlay_screen)}
+            description={t("Shows a red frame (yellow block = top left) for a few seconds. It should sit exactly on the screen edges. If not, pick another size above.")}
+          >
+            {t("Show screen frame")}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
           <SliderField
-            label="Popup size"
-            description="0% hides the banner; 50% is the default size."
+            label={t("Popup size")}
+            description={t("0% hides the banner; 50% is the default size.")}
             value={settings.overlay_size_percent}
             min={0}
             max={100}
@@ -1049,8 +1149,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Popup duration"
-            description="How long the toast stays on screen before it slides away."
+            label={t("Popup duration")}
+            description={t("How long the toast stays on screen before it slides away.")}
             value={settings.duration_seconds}
             min={DURATION_RANGE.min}
             max={DURATION_RANGE.max}
@@ -1066,8 +1166,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Show unlock percentage"
-            description="Shows what percentage of players have the achievement, e.g. 4.7% of players."
+            label={t("Show unlock percentage")}
+            description={t("Shows what percentage of players have the achievement, e.g. 4.7% of players.")}
             checked={settings.show_percent}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ show_percent: value })}
@@ -1075,9 +1175,9 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Percentage badge position"
-            description="Top right gives the description the full width, so short descriptions don't end in ... and long ones can use two lines."
-            rgOptions={PERCENT_POSITION_OPTIONS}
+            label={t("Percentage badge position")}
+            description={t("Top right gives the description the full width, so short descriptions don't end in ... and long ones can use two lines.")}
+            rgOptions={tOpts(PERCENT_POSITION_OPTIONS)}
             selectedOption={settings.percent_position}
             disabled={pendingAction !== null}
             onChange={(selection: { data: PercentPosition }) =>
@@ -1088,8 +1188,8 @@ function StatusPanel() {
         {settings.show_percent && (
           <PanelSectionRow>
             <SliderField
-              label="Unlock percentage size"
-              description="Size of the small '4.7% of players' badge. 100% is the default."
+              label={t("Unlock percentage size")}
+              description={t("Size of the small '4.7% of players' badge. 100% is the default.")}
               value={settings.percent_size}
               min={PERCENT_SIZE_RANGE.min}
               max={PERCENT_SIZE_RANGE.max}
@@ -1104,8 +1204,8 @@ function StatusPanel() {
         )}
         <PanelSectionRow>
           <ToggleField
-            label="Template effects"
-            description="Extra touches on some templates: typing text, animated backgrounds, glitches, screws, a game-name header and more. Turn off for the plain look."
+            label={t("Template effects")}
+            description={t("Extra touches on some templates: typing text, animated backgrounds, glitches, screws, a game-name header and more. Turn off for the plain look.")}
             checked={settings.template_fx_enabled}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ template_fx_enabled: value })}
@@ -1113,8 +1213,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Completion popup at 100%"
-            description="When you unlock the very last achievement in any game, shows a special emerald completion popup after that achievement's own popup."
+            label={t("Completion popup at 100%")}
+            description={t("When you unlock the very last achievement in any game, shows a special emerald completion popup after that achievement's own popup.")}
             checked={settings.completion_toast_enabled}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ completion_toast_enabled: value })}
@@ -1123,9 +1223,9 @@ function StatusPanel() {
         {settings.completion_toast_enabled && (
           <PanelSectionRow>
             <DropdownItem
-              label="Completion popup name"
-              description="The big text on the 100% completion popup."
-              rgOptions={COMPLETION_TITLE_OPTIONS}
+              label={t("Completion popup name")}
+              description={t("The big text on the 100% completion popup.")}
+              rgOptions={tOpts(COMPLETION_TITLE_OPTIONS)}
               selectedOption={settings.completion_title}
               disabled={pendingAction !== null}
               onChange={(selection: { data: CompletionTitle }) =>
@@ -1136,9 +1236,9 @@ function StatusPanel() {
         )}
         <PanelSectionRow>
           <DropdownItem
-            label="Placeholder icon"
-            description="Shown when an achievement has no icon yet (and as the starting icon on Xbox 360 v2)."
-            rgOptions={PLACEHOLDER_ICON_OPTIONS}
+            label={t("Placeholder icon")}
+            description={t("Shown when an achievement has no icon yet (and as the starting icon on Xbox 360 v2).")}
+            rgOptions={tOpts(PLACEHOLDER_ICON_OPTIONS)}
             selectedOption={settings.placeholder_icon}
             disabled={pendingAction !== null}
             onChange={(selection: { data: PlaceholderIcon }) =>
@@ -1147,11 +1247,11 @@ function StatusPanel() {
           />
         </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="Rarity Tiers">
+      <PanelSection title={t("Rarity Tiers")}>
         <PanelSectionRow>
           <ToggleField
-            label="Rarity tiers"
-            description="Names each unlock by how few players have it (Uncommon, Rare, Ultra rare) in the popup label. Ultra rare also gets extra sparkles and a longer shine. Rare keeps the gold look and sound."
+            label={t("Rarity tiers")}
+            description={t("Names each unlock by how few players have it (Uncommon, Rare, Ultra rare) in the popup label. Ultra rare also gets extra sparkles and a longer shine. Rare keeps the gold look and sound.")}
             checked={settings.rarity_tiers_enabled}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ rarity_tiers_enabled: value })}
@@ -1161,7 +1261,7 @@ function StatusPanel() {
           <>
             <PanelSectionRow>
               <SliderField
-                label="Ultra rare: this % or lower"
+                label={t("Ultra rare: this % or lower")}
                 value={settings.tier_ultra_cutoff}
                 min={TIER_CUTOFF_RANGES.ultra.min}
                 max={TIER_CUTOFF_RANGES.ultra.max}
@@ -1174,7 +1274,7 @@ function StatusPanel() {
             </PanelSectionRow>
             <PanelSectionRow>
               <SliderField
-                label="Rare: this % or lower"
+                label={t("Rare: this % or lower")}
                 value={settings.tier_rare_cutoff}
                 min={TIER_CUTOFF_RANGES.rare.min}
                 max={TIER_CUTOFF_RANGES.rare.max}
@@ -1187,7 +1287,7 @@ function StatusPanel() {
             </PanelSectionRow>
             <PanelSectionRow>
               <SliderField
-                label="Uncommon: this % or lower"
+                label={t("Uncommon: this % or lower")}
                 value={settings.tier_uncommon_cutoff}
                 min={TIER_CUTOFF_RANGES.uncommon.min}
                 max={TIER_CUTOFF_RANGES.uncommon.max}
@@ -1200,7 +1300,7 @@ function StatusPanel() {
             </PanelSectionRow>
             <PanelSectionRow>
               <div style={{ fontSize: "12px", opacity: 0.8 }}>
-                {`Ultra rare ≤ ${settings.tier_ultra_cutoff}%, Rare ≤ ${settings.tier_rare_cutoff}%, Uncommon ≤ ${settings.tier_uncommon_cutoff}%, anything higher is common (no tier label). The cutoffs stay in order automatically.`}
+                {t("Ultra rare ≤ {ultra}%, Rare ≤ {rare}%, Uncommon ≤ {uncommon}%, anything higher is common (no tier label). The cutoffs stay in order automatically.", { ultra: settings.tier_ultra_cutoff, rare: settings.tier_rare_cutoff, uncommon: settings.tier_uncommon_cutoff })}
               </div>
             </PanelSectionRow>
           </>
@@ -1211,11 +1311,11 @@ function StatusPanel() {
 
       {view === "style" && (
         <>
-      <PanelSection title="Colors">
+      <PanelSection title={t("Colors")}>
         <PanelSectionRow>
           <ToggleField
-            label="Use each template's own colors"
-            description="The simple way: every template uses its own built-in palette (for example Xbox green, PlayStation blue, Steam blue). While this is on, all the color options below are greyed out and ignored."
+            label={t("Use each template's own colors")}
+            description={t("The simple way: every template uses its own built-in palette (for example Xbox green, PlayStation blue, Steam blue). While this is on, all the color options below are greyed out and ignored.")}
             checked={settings.template_colors_enabled}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ template_colors_enabled: value })}
@@ -1223,8 +1323,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Gradient from icon colors"
-            description="Pull the card's background gradient from the achievement icon's own colors instead of the fixed colors below. Works on every template except Paper Light. Falls back to the fixed colors if the icon has no clear dominant colors (or no icon is available)."
+            label={t("Gradient from icon colors")}
+            description={t("Pull the card's background gradient from the achievement icon's own colors instead of the fixed colors below. Works on every template except Paper Light. Falls back to the fixed colors if the icon has no clear dominant colors (or no icon is available).")}
             checked={settings.icon_gradient_enabled}
             disabled={pendingAction !== null || colorsLocked}
             onChange={(value) =>
@@ -1238,8 +1338,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Gradient from game artwork colors"
-            description="Pull the gradient from the game's own artwork instead, so every toast in a game shares one palette. Turning this on turns off the icon option above (they're one or the other). Falls back to the icon's colors if the artwork can't be read."
+            label={t("Gradient from game artwork colors")}
+            description={t("Pull the gradient from the game's own artwork instead, so every toast in a game shares one palette. Turning this on turns off the icon option above (they're one or the other). Falls back to the icon's colors if the artwork can't be read.")}
             checked={settings.game_art_gradient_enabled}
             disabled={pendingAction !== null || colorsLocked}
             onChange={(value) =>
@@ -1253,9 +1353,9 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Gradient direction"
-            description="Direction of the card's background gradient, or a flat solid color."
-            rgOptions={GRADIENT_DIRECTION_OPTIONS}
+            label={t("Gradient direction")}
+            description={t("Direction of the card's background gradient, or a flat solid color.")}
+            rgOptions={tOpts(GRADIENT_DIRECTION_OPTIONS)}
             selectedOption={settings.gradient_direction}
             disabled={pendingAction !== null || colorsLocked}
             onChange={(selection: { data: GradientDirection }) =>
@@ -1304,11 +1404,11 @@ function StatusPanel() {
           {colorButton("rare_circle_color", "Rare circle color")}
         </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="Glow">
+      <PanelSection title={t("Glow")}>
         <PanelSectionRow>
           <ToggleField
-            label="Icon glow"
-            description="The soft glow around the icon, and the pulsing glow ring (rare achievements, or normal ones too if enabled below)."
+            label={t("Icon glow")}
+            description={t("The soft glow around the icon, and the pulsing glow ring (rare achievements, or normal ones too if enabled below).")}
             checked={settings.icon_glow_enabled}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ icon_glow_enabled: value })}
@@ -1318,8 +1418,8 @@ function StatusPanel() {
           <>
             <PanelSectionRow>
               <SliderField
-                label="Glow intensity"
-                description="50 is the default look; 0 is basically off, 100 doubles it."
+                label={t("Glow intensity")}
+                description={t("50 is the default look; 0 is basically off, 100 doubles it.")}
                 value={settings.icon_glow_intensity}
                 min={GLOW_INTENSITY_RANGE.min}
                 max={GLOW_INTENSITY_RANGE.max}
@@ -1334,8 +1434,8 @@ function StatusPanel() {
             </PanelSectionRow>
             <PanelSectionRow>
               <SliderField
-                label="Ring size"
-                description="How far the glow rings spread. 50 is the default look; 0 hides them, 100 doubles it."
+                label={t("Ring size")}
+                description={t("How far the glow rings spread. 50 is the default look; 0 hides them, 100 doubles it.")}
                 value={settings.ring_size}
                 min={RING_SIZE_RANGE.min}
                 max={RING_SIZE_RANGE.max}
@@ -1348,8 +1448,8 @@ function StatusPanel() {
             </PanelSectionRow>
             <PanelSectionRow>
               <ToggleField
-                label="Glow for normal achievements"
-                description="The pulsing glow ring normally only plays for rare unlocks -- turn this on to also play it for regular ones. (The rare corner ribbon and sparkles stay rare-only, since those specifically mean 'this one's rare'.)"
+                label={t("Glow for normal achievements")}
+                description={t("The pulsing glow ring normally only plays for rare unlocks -- turn this on to also play it for regular ones. (The rare corner ribbon and sparkles stay rare-only, since those specifically mean 'this one's rare'.)")}
                 checked={settings.glow_normal_enabled}
                 disabled={pendingAction !== null}
                 onChange={(value) => void updateSettings({ glow_normal_enabled: value })}
@@ -1359,19 +1459,19 @@ function StatusPanel() {
         )}
         <PanelSectionRow>
           <ToggleField
-            label="Icon frame ring"
-            description="The colored ring framing the icon, separate from the glow above. With it off, the icon just sits on a plain dark backing."
+            label={t("Icon frame ring")}
+            description={t("The colored ring framing the icon, separate from the glow above. With it off, the icon just sits on a plain dark backing.")}
             checked={settings.icon_frame_ring_enabled}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ icon_frame_ring_enabled: value })}
           />
         </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="Text">
+      <PanelSection title={t("Text")}>
         <PanelSectionRow>
           <SliderField
-            label="Title font size"
-            description="Font size of the achievement name."
+            label={t("Title font size")}
+            description={t("Font size of the achievement name.")}
             value={settings.title_font_size}
             min={FONT_SIZE_RANGES.title_font_size.min}
             max={FONT_SIZE_RANGES.title_font_size.max}
@@ -1383,8 +1483,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Description font size"
-            description="Font size of the subtitle/description line."
+            label={t("Description font size")}
+            description={t("Font size of the subtitle/description line.")}
             value={settings.subtitle_font_size}
             min={FONT_SIZE_RANGES.subtitle_font_size.min}
             max={FONT_SIZE_RANGES.subtitle_font_size.max}
@@ -1398,8 +1498,8 @@ function StatusPanel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <SliderField
-            label="Label font size"
-            description="Font size of the small eyebrow label above the title."
+            label={t("Label font size")}
+            description={t("Font size of the small eyebrow label above the title.")}
             value={settings.label_font_size}
             min={FONT_SIZE_RANGES.label_font_size.min}
             max={FONT_SIZE_RANGES.label_font_size.max}
@@ -1415,11 +1515,11 @@ function StatusPanel() {
 
       {view === "sound" && (
         <>
-      <PanelSection title="Sound">
+      <PanelSection title={t("Sound")}>
         <PanelSectionRow>
           <SliderField
-            label="Volume"
-            description="50% is the default volume; 0% is silent."
+            label={t("Volume")}
+            description={t("50% is the default volume; 0% is silent.")}
             value={settings.volume_percent}
             min={0}
             max={100}
@@ -1436,8 +1536,8 @@ function StatusPanel() {
           return (
             <PanelSectionRow key={slot}>
               <DropdownItem
-                label={label}
-                description={description}
+                label={t(label)}
+                description={t(description)}
                 rgOptions={soundOptions}
                 selectedOption={settings[key]}
                 disabled={pendingAction !== null || soundOptions.length === 0}
@@ -1450,10 +1550,7 @@ function StatusPanel() {
         })}
         <PanelSectionRow>
           <div style={{ fontSize: "12px", opacity: 0.8 }}>
-            Your own sounds: put .wav, .flac, .ogg or .mp3 files (10 MB or less, kept short) in{" "}
-            <b>{soundFolder || "the Finally Achievement Plugin settings folder, sounds"}</b>, then press Refresh. They show up with "(yours)"
-            after their name, and updating the plugin never deletes them. Use the test buttons below to hear each
-            one.
+            {t("Your own sounds: put .wav, .flac, .ogg or .mp3 files (10 MB or less, kept short) in {folder}, then press Refresh. They show up with \"(yours)\" after their name, and updating the plugin never deletes them. Use the test buttons below to hear each one.", { folder: soundFolder || t("the Finally Achievement Plugin settings folder, sounds") })}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1462,15 +1559,15 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void refreshSettings()}
           >
-            Refresh sound list
+            {t("Refresh sound list")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="Popup Tests">
+      <PanelSection title={t("Popup Tests")}>
         <PanelSectionRow>
           <ToggleField
-            label="Use the running game for tests"
-            description="While a game is running, tests show a random achievement from it (even a locked one) with its real icon and the game's artwork. Tests never count as unlocks. With no game running, or this off, tests use a sample."
+            label={t("Use the running game for tests")}
+            description={t("While a game is running, tests show a random achievement from it (even a locked one) with its real icon and the game's artwork. Tests never count as unlocks. With no game running, or this off, tests use a sample.")}
             checked={settings.test_with_game_data}
             disabled={pendingAction !== null}
             onChange={(value) => void updateSettings({ test_with_game_data: value })}
@@ -1481,9 +1578,9 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void trigger("test_popup_common")}
             layout="below"
-            description="A common unlock (above the Uncommon cutoff): no tier label."
+            description={t("A common unlock (above the Uncommon cutoff): no tier label.")}
           >
-            Test Common
+            {t("Test Common")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1491,9 +1588,9 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void trigger("test_popup_uncommon")}
             layout="below"
-            description="An uncommon unlock: tier label only."
+            description={t("An uncommon unlock: tier label only.")}
           >
-            Test Uncommon
+            {t("Test Uncommon")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1501,9 +1598,9 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void trigger("test_popup_rare")}
             layout="below"
-            description="A rare unlock: gold look, rare sound and glow."
+            description={t("A rare unlock: gold look, rare sound and glow.")}
           >
-            Test Rare
+            {t("Test Rare")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1511,9 +1608,9 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void trigger("test_popup_ultra_rare")}
             layout="below"
-            description="An ultra rare unlock: extra sparkles and a longer shine."
+            description={t("An ultra rare unlock: extra sparkles and a longer shine.")}
           >
-            Test Ultra Rare
+            {t("Test Ultra Rare")}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1521,9 +1618,9 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void trigger("test_completion_popup")}
             layout="below"
-            description="The special popup for unlocking every achievement in a game, using the running game's name."
+            description={t("The special popup for unlocking every achievement in a game, using the running game's name.")}
           >
-            Test Completionist
+            {t("Test Completionist")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -1532,12 +1629,10 @@ function StatusPanel() {
 
       {view === "advanced" && (
         <>
-      <PanelSection title="Popup Not Showing?">
+      <PanelSection title={t("Popup Not Showing?")}>
         <PanelSectionRow>
           <div style={{ fontSize: "12px", opacity: 0.8 }}>
-            If you hear the sound but no popup appears (for example on a different handheld), run this check. It tests
-            the Python packages, graphics libraries, display and window creation the popup needs, and tells you what's
-            missing.
+            {t("If you hear the sound but no popup appears (for example on a different handheld), run this check. It tests the Python packages, graphics libraries, display and window creation the popup needs, and tells you what's missing.")}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -1546,7 +1641,7 @@ function StatusPanel() {
             disabled={pendingAction !== null}
             onClick={() => void handleOverlayCheck()}
           >
-            {pendingAction === "overlay_check" ? "Checking..." : "Run overlay check"}
+            {pendingAction === "overlay_check" ? t("Checking...") : t("Run overlay check")}
           </ButtonItem>
         </PanelSectionRow>
         {overlayCheck && (
@@ -1581,26 +1676,22 @@ function StatusPanel() {
         )}
       </PanelSection>
 
-      <PanelSection title="Achievement Icon Accuracy">
+      <PanelSection title={t("Achievement Icon Accuracy")}>
         <PanelSectionRow>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.65)", marginBottom: 6 }}>
-            Toast icons normally come from Steam's local cache, which can
-            occasionally show the wrong (grayscale/locked) icon. Adding a free
-            Steam Web API key makes Finally Achievement Plugin fetch the guaranteed-correct,
-            full-color icon straight from Steam every time. Get one at
-            steamcommunity.com/dev/apikey
+            {t("Toast icons normally come from Steam's local cache, which can occasionally show the wrong (grayscale/locked) icon. Adding a free Steam Web API key makes Finally Achievement Plugin fetch the guaranteed-correct, full-color icon straight from Steam every time. Get one at steamcommunity.com/dev/apikey")}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <div style={{ fontSize: 13 }}>
             {apiKeyStatus.configured
-              ? `Key saved (ending in ${apiKeyStatus.masked?.slice(-4) ?? "????"})`
-              : "No API key set -- using the local cache only."}
+              ? t("Key saved (ending in {tail})", { tail: apiKeyStatus.masked?.slice(-4) ?? "????" })
+              : t("No API key set -- using the local cache only.")}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <TextField
-            label="Steam Web API key"
+            label={t("Steam Web API key")}
             value={apiKeyInput}
             onChange={(event) => setApiKeyInput(event.target.value)}
             disabled={apiKeyBusy}
@@ -1612,13 +1703,13 @@ function StatusPanel() {
             disabled={apiKeyBusy || apiKeyInput.trim().length === 0}
             onClick={() => void handleSaveApiKey()}
           >
-            {apiKeyBusy ? "Saving..." : "Save key"}
+            {apiKeyBusy ? t("Saving...") : t("Save key")}
           </ButtonItem>
         </PanelSectionRow>
         {apiKeyStatus.configured && (
           <PanelSectionRow>
             <ButtonItem layout="below" disabled={apiKeyBusy} onClick={() => void handleClearApiKey()}>
-              Remove key
+              {t("Remove key")}
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -1629,22 +1720,22 @@ function StatusPanel() {
         )}
         <PanelSectionRow>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.55)", marginTop: 4 }}>
-            Last unlock's icon: {describeIconResolution(iconDiagnostic)}
+            {t("Last unlock's icon:")} {describeIconResolution(iconDiagnostic)}
             {iconDiagnostic.achievement_id ? ` (${iconDiagnostic.achievement_id})` : ""}
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => void refreshIconDiagnostic()}>
-            Refresh
+            {t("Refresh")}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
-      <PanelSection title="Watcher Status">
+      <PanelSection title={t("Watcher Status")}>
         <PanelSectionRow>
           <ButtonItem
             disabled={pendingAction !== null}
             onClick={() => void refreshStatus()}
-            description="Manually refresh backend status."
+            description={t("Manually refresh backend status.")}
           >
             Refresh Status
           </ButtonItem>

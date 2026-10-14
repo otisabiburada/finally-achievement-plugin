@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 export type TrackerTarget = {
   appid: number;
   achievement_id: string;
@@ -82,6 +83,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
 };
 
 export function friendlyError(code: string | null): string {
-  if (!code) return "Something went wrong.";
-  return ERROR_MESSAGES[code] ?? code;
+  if (!code) return t("Something went wrong.");
+  const message = ERROR_MESSAGES[code];
+  return message ? t(message) : code;
 }

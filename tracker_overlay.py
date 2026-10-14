@@ -181,6 +181,7 @@ class TrackerRunner:
 
         state = _read_json(self.paths.get("state"))
         style = _read_json(self.paths.get("style")) or {}
+        toast.set_language(style.get("language") or os.environ.get("FINALLY_LANG", "en"))
         control = _read_json(self.paths.get("control")) or {}
         want_visible = not bool(control.get("hidden"))
 

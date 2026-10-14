@@ -53,6 +53,21 @@ def configure_api(lib: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_float),
     ]
     lib.SteamAPI_ISteamUserStats_GetAchievementAchievedPercent.restype = ctypes.c_bool
+    try:
+        lib.SteamAPI_ISteamUserStats_RequestCurrentStats.argtypes = [ctypes.c_void_p]
+        lib.SteamAPI_ISteamUserStats_RequestCurrentStats.restype = ctypes.c_bool
+    except AttributeError:
+        pass
+
+
+def request_stats(lib: ctypes.CDLL, stats: int) -> bool:
+    """Asks Steam to resend this game's stats/achievements to this process, so a
+    change made by the game is seen promptly instead of whenever Steam next
+    pushes it. Harmless if unsupported."""
+    try:
+        return bool(lib.SteamAPI_ISteamUserStats_RequestCurrentStats(stats))
+    except Exception:
+        return False
 
 
 def get_achievement_names(lib: ctypes.CDLL, stats: int) -> List[str]:
@@ -107,6 +122,7 @@ def main() -> int:
     parser.add_argument("--appid", type=int, required=True)
     parser.add_argument("--poll-ms", type=int, default=100)
     parser.add_argument("--baseline-ms", type=int, default=2500)
+    parser.add_argument("--refresh-ms", type=int, default=0)
     parser.add_argument("--lib", default="/home/deck/.local/share/Steam/steamrt64/libsteam_api.so")
     args = parser.parse_args()
 
@@ -138,6 +154,10 @@ def main() -> int:
 
         interval = max(0.05, args.poll_ms / 1000.0)
         baseline_deadline = time.monotonic() + max(0.0, args.baseline_ms / 1000.0)
+        refresh = max(0.0, args.refresh_ms / 1000.0)
+        next_refresh = time.monotonic() + refresh
+        if refresh:
+            request_stats(lib, stats)
         previous = snapshot(lib, stats, names)
         while time.monotonic() < baseline_deadline:
             lib.SteamAPI_RunCallbacks()
@@ -153,6 +173,9 @@ def main() -> int:
 
         while True:
             lib.SteamAPI_RunCallbacks()
+            if refresh and time.monotonic() >= next_refresh:
+                request_stats(lib, stats)
+                next_refresh = time.monotonic() + refresh
             current = snapshot(lib, stats, names)
             # Running count of unlocked achievements, advanced one unlock at
             # a time, so that when several land in the same poll only the

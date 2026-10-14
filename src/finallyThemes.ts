@@ -1,4 +1,5 @@
 import type { TrackerPosition } from "./achievementsTypes";
+import type { LanguageSetting } from "./i18n";
 export const PLUGIN_NAME = "Finally Achievement Plugin";
 export const EVENT_NAME = "finally_show";
 export const SETTINGS_EVENT = "finally_settings_changed";
@@ -14,6 +15,8 @@ export type FinallySettings = {
   overlay_size_percent: number;
   volume_percent: number;
   overlay_position: OverlayPosition;
+  overlay_screen: OverlayScreen;
+  language: LanguageSetting;
   overlay_template: OverlayTemplate;
   label_font_size: number;
   title_font_size: number;
@@ -30,6 +33,9 @@ export type FinallySettings = {
   placeholder_icon: PlaceholderIcon;
   game_art_gradient_enabled: boolean;
   completion_toast_enabled: boolean;
+  session_summary_enabled: boolean;
+  near_completion_enabled: boolean;
+  near_completion_threshold: number;
   completion_title: CompletionTitle;
   percent_size: number;
   percent_position: PercentPosition;
@@ -150,6 +156,25 @@ export const OVERLAY_POSITION_OPTIONS: { data: OverlayPosition; label: string }[
   { data: "bottom_right", label: "Bottom right" },
 ];
 
+export type OverlayScreen =
+  | "auto"
+  | "1280x800"
+  | "1920x1080"
+  | "1920x1200"
+  | "2560x1440"
+  | "2560x1600"
+  | "3840x2160";
+
+export const OVERLAY_SCREEN_OPTIONS: { data: OverlayScreen; label: string }[] = [
+  { data: "auto", label: "Auto (detect)" },
+  { data: "1280x800", label: "1280 x 800" },
+  { data: "1920x1080", label: "1920 x 1080 (Full HD TV)" },
+  { data: "1920x1200", label: "1920 x 1200" },
+  { data: "2560x1440", label: "2560 x 1440" },
+  { data: "2560x1600", label: "2560 x 1600 (Legion Go screen)" },
+  { data: "3840x2160", label: "3840 x 2160 (4K TV)" },
+];
+
 export type OverlayTemplate =
   | "xbox_modern"
   | "playstation_trophy"
@@ -222,6 +247,8 @@ export const DEFAULT_SETTINGS: FinallySettings = {
   overlay_size_percent: 50,
   volume_percent: 50,
   overlay_position: "bottom_center",
+  overlay_screen: "auto",
+  language: "auto",
   overlay_template: "xbox_modern",
   label_font_size: 13,
   title_font_size: 26,
@@ -238,6 +265,9 @@ export const DEFAULT_SETTINGS: FinallySettings = {
   placeholder_icon: "auto",
   game_art_gradient_enabled: false,
   completion_toast_enabled: true,
+  session_summary_enabled: true,
+  near_completion_enabled: true,
+  near_completion_threshold: 2,
   completion_title: "completionist",
   percent_size: 100,
   percent_position: "bottom_right",

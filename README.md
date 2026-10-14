@@ -11,7 +11,7 @@
   <img alt="Decky Loader" src="https://img.shields.io/badge/Decky%20Loader-plugin-6366f1">
   <img alt="Platform" src="https://img.shields.io/badge/SteamOS-Steam%20Deck-1a9fff">
   <img alt="License" src="https://img.shields.io/badge/license-BSD--3--Clause-green">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-f59e0b">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.2-f59e0b">
 </p>
 
 ---
@@ -67,7 +67,7 @@ This is the easiest method. You only need to copy and paste commands.
 mkdir -p ~/homebrew/plugins
 cd ~/Downloads
 rm -rf finally.zip finally-achievement-plugin-main
-curl -L https://github.com/otisabi/finally-achievement-plugin/archive/refs/heads/main.zip -o finally.zip
+curl -L https://github.com/otisabiburada/finally-achievement-plugin/archive/refs/heads/main.zip -o finally.zip
 unzip finally.zip
 rm -rf "$HOME/homebrew/plugins/Finally Achievement Plugin"
 mv finally-achievement-plugin-main "$HOME/homebrew/plugins/Finally Achievement Plugin"
@@ -101,7 +101,7 @@ Use this if you do not want to paste commands.
 1. Switch to Desktop Mode.
 2. Open this page in a browser:
 
-[https://github.com/otisabi/finally-achievement-plugin](https://github.com/otisabi/finally-achievement-plugin)
+[https://github.com/otisabiburada/finally-achievement-plugin](https://github.com/otisabiburada/finally-achievement-plugin)
 
 3. Press the green `Code` button.
 4. Press `Download ZIP`.
@@ -130,6 +130,10 @@ The final path should look like this:
 9. Restart the Steam Deck.
 10. Open Decky in Gaming Mode and look for `Finally Achievement Plugin`.
 
+## Install from a release zip
+
+Download `Finally-Achievement-Plugin.zip` from the [latest release](https://github.com/otisabiburada/finally-achievement-plugin/releases/latest). On the Deck, open Decky > Settings > Developer, turn on Developer mode, and choose "Install plugin from ZIP file" (or "Install plugin from URL" with the release link). The release already contains everything, so nothing needs to be built.
+
 ## Update Finally Achievement Plugin
 
 To update to the newest GitHub version:
@@ -141,7 +145,7 @@ To update to the newest GitHub version:
 ```bash
 cd ~/Downloads
 rm -rf finally.zip finally-achievement-plugin-main
-curl -L https://github.com/otisabi/finally-achievement-plugin/archive/refs/heads/main.zip -o finally.zip
+curl -L https://github.com/otisabiburada/finally-achievement-plugin/archive/refs/heads/main.zip -o finally.zip
 unzip finally.zip
 rm -rf "$HOME/homebrew/plugins/Finally Achievement Plugin"
 mv finally-achievement-plugin-main "$HOME/homebrew/plugins/Finally Achievement Plugin"
@@ -269,6 +273,75 @@ plugin, remove it: your pinned achievement, position and size are carried over t
 A popup and tracker template that uses the running game's own artwork as the card background, blurred, under a
 black vignette. Pick **Game Art Blur** in the template list. With no game running (or no artwork found) it falls
 back to a plain dark card with the vignette.
+
+## Instant unlock detection and descriptions (v1.6.2)
+
+The same Steam Machine report (popup only after pressing the Steam button, 1-2 minutes late, or with just a title) was traced further.
+
+- **New watcher:** Steam writes `appcache/stats/UserGameStats_<account>_<appid>.bin` as soon as a game stores an unlock. The plugin now checks those files once a second and reads the unlock straight from the file that changed, instead of waiting for Steam's library data (which only refreshes when the Steam interface does, for example when you press the Steam button). An unlock is announced about a second after Steam writes it. An unlock that another detection path shows first is never shown twice.
+- **Descriptions:** names and descriptions now come first from Steam's own local schema file (`UserGameStatsSchema_<appid>.bin`). It holds every language and includes secret achievements, so there is no waiting and no 3-second cut-off. If that file has nothing, the helper lookup is tried up to 3 times instead of once.
+- **Not confirmed on that machine:** this is based on how Steam's files look on a normal install (checked against real Steam files and covered by `tests/test_stats_bin.py`). If a popup is still late, open **Advanced** after an unlock, look at the watcher status and last source, and send the plugin log.
+
+## Popup late, or without a description (v1.6.1)
+
+Reported on a Steam Machine: the popup only appeared after pressing the Steam button, or 1-2 minutes late, and then without a description.
+
+- The achievement helper now asks Steam to resend the game's stats every 2 seconds, so an unlock made by the game is noticed promptly. (This is my best explanation of the delay and is not confirmed on that machine; if it still happens, open **Advanced** after an unlock and look at the watcher status and the last source, and send the plugin log.)
+- The Steam library the helper needs is now also looked for under your own Steam install (other user names, Flatpak Steam), not only `/home/deck`.
+- When a popup arrives without a description (secret achievements have none in Steam's web data), the plugin asks Steam for it, once, and waits at most 3 seconds.
+
+## History, share cards and milestone popups (v1.6.0)
+
+Open the panel and choose **History & sharing** in the "Show" dropdown.
+
+- **Recent Unlocks** lists what you unlocked, with the game, rarity and time. History starts from the day you install 1.6.0 (the last 500 unlocks are kept in `history.json` in the plugin's settings folder). **Clear history** empties it.
+- **Share card:** select an unlock to make a 1200 x 630 image card (icon, name, description, rarity, game, date). It is saved to `Pictures/Finally Achievements` in your home folder, and the panel shows a preview and the path. The plugin does not post anywhere; open the file from Desktop Mode (or copy it off the device) to share it.
+- **Session summary:** when you close a game, one popup such as "3 unlocked, 1 rare". Only appears if you unlocked something during that session.
+- **Almost there alert:** after an unlock, a popup such as "Only 2 achievements left" once a game is down to the number you choose (1 to 5). Shown once per remaining count, not for finished games, and not for games with very few achievements.
+
+Both milestone popups use the same look as the 100% popup and follow your volume, size and position settings. Use the test buttons in the same view to preview them.
+
+## Languages (v1.5.0)
+
+The panel and the popups are available in English, Turkish (Turkce), German, French, Spanish, Portuguese (Brazil), Russian, Simplified Chinese and Polish (Polski, added in 1.6.1).
+
+- **Auto** (default) follows the language of the Steam client. Pick another one with **Language** at the top of the panel.
+- Popups, the pinned tracker and the achievement text fetched from Steam use it too. Achievement names and descriptions always follow Steam's own language, which is what Steam shows in its popups.
+- The detailed status dump under **Advanced** stays in English on purpose.
+- **Simplified Chinese** needs a Chinese font for the popups. The plugin uses an installed one (Noto Sans SC, Source Han Sans, WenQuanYi...). If none is found the panel says so: copy a `.ttf`/`.otf`/`.ttc` font file into `~/homebrew/settings/Finally Achievement Plugin/fonts/` (the panel shows the exact folder) and run a test popup.
+- The translations were written by an AI. Corrections are very welcome as pull requests.
+
+### Adding or fixing a translation
+
+Translations live in `locales/<code>.json` as `"English text": "translation"`; the English text is the key, so anything missing just shows in English. They are generated from `tools/locale_src.py`:
+
+1. Edit `tools/locale_src.py` (one line per string, one column per language, keep `{placeholders}` unchanged). Polish lives in `tools/locale_pl.py` (English text -> Polish).
+2. Run `python3 tools/write_locales.py`. It rewrites `locales/*.json` and `src/locales.ts` and reports missing or unused strings.
+3. Rebuild the panel (`pnpm build`).
+
+To add a language, add its code to `ORDER` and `NAMES` there, to `SUPPORTED` in `finally_i18n.py` and `src/i18n.ts`, to `LANGUAGE_CHOICES` in `main.py`, and a column to every entry.
+
+## Popups in the wrong place on a TV (v1.4.1)
+
+When the device is connected to a TV, gamescope can scale the popup canvas
+differently from the screen size the X display reports, so the popups land in
+the wrong spot. In **Appearance** there is now a **Popup screen size** setting
+and a **Show screen frame** button:
+
+1. Leave it on **Auto** on the Steam Deck's own screen.
+2. On a TV, press **Show screen frame**. A red frame (yellow block = top left)
+   appears for a few seconds. It should sit exactly on the screen edges.
+3. If it doesn't, pick the TV's resolution (or the one that makes the frame fit)
+   and press the button again. The size applies to the popups and the tracker.
+
+The size is per device: it is not part of a per-game profile.
+
+## No popup sound (v1.4.1)
+
+The sound used to be tagged `media.role=event`, which some setups (Steam
+Machine, TVs over HDMI) route to nothing. The tag is gone, so the sound plays
+on the normal output. If you applied the `sed` workaround from the GitHub issue,
+you don't need it any more.
 
 ## Sound plays but no popup shows
 

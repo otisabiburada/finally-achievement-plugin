@@ -241,6 +241,7 @@ def _configure_ctypes():
     gl.glClearColor.argtypes = (ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float)
     gl.glClear.argtypes = (ctypes.c_uint,)
     gl.glEnable.argtypes = (ctypes.c_uint,)
+    gl.glDisable.argtypes = (ctypes.c_uint,)
     gl.glBlendFunc.argtypes = (ctypes.c_uint, ctypes.c_uint)
     gl.glMatrixMode.argtypes = (ctypes.c_uint,)
     gl.glLoadIdentity.restype = None
@@ -264,6 +265,48 @@ def _configure_ctypes():
     gl.glEnd.restype = None
     gl.glTexCoord2f.argtypes = (ctypes.c_float, ctypes.c_float)
     gl.glVertex2f.argtypes = (ctypes.c_float, ctypes.c_float)
+
+
+# Language of the popup text (FINALLY_LANG; the plugin passes the same language
+# the panel uses). finally_i18n.py sits next to this file.
+LANG = "en"
+_CJK_FALLBACK = (
+    "Noto Sans CJK SC, Noto Sans SC, Source Han Sans SC, WenQuanYi Zen Hei, "
+    "WenQuanYi Micro Hei, Droid Sans Fallback, Noto Sans CJK JP"
+)
+
+
+def set_language(code):
+    global LANG
+    LANG = code if isinstance(code, str) and code else "en"
+
+
+def tr(text, **values):
+    """`text` in the popup language (English when there is no translation)."""
+    try:
+        import finally_i18n
+        return finally_i18n.translate(LANG, text, **values)
+    except Exception:
+        for name, value in values.items():
+            text = text.replace("{" + name + "}", str(value))
+        return text
+
+
+def _decimal(text):
+    """4.7 -> 4,7 in the languages that write a decimal comma."""
+    try:
+        import finally_i18n
+        return finally_i18n.format_decimal(LANG, text)
+    except Exception:
+        return text
+
+
+def _font_family(family):
+    """The font family list for Pango. Chinese text gets Chinese fonts as
+    fallbacks behind the template's own font (Latin letters keep their look)."""
+    if LANG == "zh-Hans":
+        return f"{family}, {_CJK_FALLBACK}"
+    return family
 
 
 def _display_size() -> tuple[int, int]:
@@ -342,7 +385,7 @@ def _measure_text(ctx, text, size, weight, family="DejaVu Sans"):
     would take up, without drawing anything -- used to size label pills."""
     layout = PangoCairo.create_layout(ctx)
     desc = Pango.FontDescription()
-    desc.set_family(family)
+    desc.set_family(_font_family(family))
     desc.set_absolute_size(size * Pango.SCALE)
     desc.set_weight(weight)
     layout.set_font_description(desc)
@@ -354,7 +397,7 @@ def _measure_text(ctx, text, size, weight, family="DejaVu Sans"):
 def _text(ctx, text, x, y, size, color, weight=Pango.Weight.BOLD, width=None, family="DejaVu Sans", max_lines=None):
     layout = PangoCairo.create_layout(ctx)
     desc = Pango.FontDescription()
-    desc.set_family(family)
+    desc.set_family(_font_family(family))
     desc.set_absolute_size(size * Pango.SCALE)
     desc.set_weight(weight)
     layout.set_font_description(desc)
@@ -997,7 +1040,7 @@ def _make_surface_door_wipe(
     label_style = template["label_style"]
     label_text = _label_text(is_rare, label_style, TIER or None)
     if mythic:
-        label_text = "\u2009".join(list(MYTHIC_LABEL))
+        label_text = "\u2009".join(list(tr(MYTHIC_LABEL)))
 
     if text_width > 20:
         if anim.label_alpha > 0:
@@ -1006,7 +1049,7 @@ def _make_surface_door_wipe(
                   (_lighten(accent[0], 0.35), _lighten(accent[1], 0.35), _lighten(accent[2], 0.35), anim.label_alpha),
                   Pango.Weight.BOLD, max(text_width - label_clear, 60) if label_clear else text_width, template["font_family"])
         if anim.title_alpha > 0:
-            _text(ctx, title or "Achievement Unlocked", tx, y + 50 + anim.title_y + exit_lift, title_font_size,
+            _text(ctx, title or tr("Achievement Unlocked"), tx, y + 50 + anim.title_y + exit_lift, title_font_size,
                   (1, 1, 1, anim.title_alpha), Pango.Weight.BOLD, text_width, template["font_family"])
         if subtitle and anim.subtitle_alpha > 0:
             subtitle_width = text_width
@@ -1348,7 +1391,7 @@ RARE_EDGE_GOLD = (1.0, 0.78, 0.25)
 
 
 def _percent_text(percent):
-    return "<0.1% of players" if percent < 0.1 else f"{percent:.1f}% of players"
+    return tr("<0.1% of players") if percent < 0.1 else tr("{percent}% of players", percent=_decimal(f"{percent:.1f}"))
 
 
 # Size of the unlock-percentage badge as a multiplier (FINALLY_PERCENT_SIZE / 100).
@@ -1960,6 +2003,7 @@ def _tier_label(style, tier):
         "bracket": (f"[{name} UNLOCK]", False),
     }
     text, spaced = table.get(style, table["spaced_caps"])
+    text = tr(text)
     if spaced:
         text = "\u2009".join(list(text))
     return text
@@ -1982,6 +2026,7 @@ def _label_text(is_rare, style, tier=None):
         "bracket": ("[RARE UNLOCK]" if is_rare else "[ACHIEVEMENT]", False),
     }
     text, spaced = table.get(style, table["spaced_caps"])
+    text = tr(text)
     if spaced:
         text = "\u2009".join(list(text))
     return text
@@ -2670,11 +2715,11 @@ _TRACKER_EXTRACT_CACHE = {}
 
 
 def _tracker_label(label_style, achieved):
-    word = "UNLOCKED" if achieved else "TRACKING"
+    word = tr("UNLOCKED" if achieved else "TRACKING")
     if label_style == "spaced_caps":
         return "\u2009".join(list(word))
     if label_style == "small_tight":
-        return word.capitalize()
+        return tr("Unlocked" if achieved else "Tracking")
     if label_style == "bracket":
         return f"[{word}]"
     return word
@@ -2837,13 +2882,13 @@ def _make_tracker_surface(width, height, scale, target, state, style, alpha=1.0)
         _text(ctx, label, tx, label_y, label_size, label_color, Pango.Weight.BOLD, text_width, font_family)
         label_h = label_size * 1.25
 
-    name_text = (target or {}).get("name") or "Achievement"
+    name_text = (target or {}).get("name") or tr("Achievement")
     title_y = label_y + label_h + 4
     _text(ctx, name_text, tx, title_y, title_size, (*title_rgb, alpha), title_weight, text_width, font_family)
     status_y = title_y + title_size * 1.3 + 2
 
     if state is None:
-        _text(ctx, "Loading...", tx, status_y, status_size, (*sub_rgb, 0.85 * alpha), Pango.Weight.NORMAL, text_width, font_family)
+        _text(ctx, tr("Loading..."), tx, status_y, status_size, (*sub_rgb, 0.85 * alpha), Pango.Weight.NORMAL, text_width, font_family)
     elif achieved:
         _text(ctx, "\u2713 Unlocked", tx, status_y, status_size + 1, (label_tint(accent[0]), label_tint(accent[1]), label_tint(accent[2]), alpha),
               Pango.Weight.BOLD, text_width, font_family)
@@ -2866,7 +2911,7 @@ def _make_tracker_surface(width, height, scale, target, state, style, alpha=1.0)
         _text(ctx, f"{current} / {total}", tx, status_y, status_size, (*sub_rgb, 0.95 * alpha), Pango.Weight.NORMAL, text_width, font_family)
     else:
         # The achievement's own description (secret ones have none yet).
-        description = str((target or {}).get("description") or "").strip() or "In progress"
+        description = str((target or {}).get("description") or "").strip() or tr("In progress")
         _text(ctx, description, tx, status_y, status_size, (*sub_rgb, 0.9 * alpha), Pango.Weight.NORMAL, text_width, font_family,
               max_lines=2)
 
@@ -3189,7 +3234,7 @@ def _make_surface(
                 ctx.arc(tx + 12 + i * 17, dots_y - bounce, 4.0, 0, math.tau)
                 ctx.fill()
 
-    title_line = title or "Achievement Unlocked"
+    title_line = title or tr("Achievement Unlocked")
     if fx and "prompt" in fx:
         title_line = "> " + title_line
     title_typing = False
@@ -3228,12 +3273,12 @@ def _make_surface(
             ctx.set_source_rgba(*title_rgb, anim.title_alpha)
             ctx.fill()
     elif anim.title_alpha > 0:
-        _text(ctx, title or "Achievement Unlocked", tx, y + title_y_off + anim.title_y, title_size,
+        _text(ctx, title or tr("Achievement Unlocked"), tx, y + title_y_off + anim.title_y, title_size,
               (*title_rgb, anim.title_alpha), title_weight, text_width, font_family)
         if bg == "terminal" and int(elapsed * 2) % 2 == 0:
             # A blinking block cursor right after the title, like a
             # terminal prompt -- toggles twice a second.
-            title_w, title_h = _measure_text(ctx, title or "Achievement Unlocked", title_size, title_weight, font_family)
+            title_w, title_h = _measure_text(ctx, title or tr("Achievement Unlocked"), title_size, title_weight, font_family)
             cursor_x = tx + min(title_w, text_width) + 4
             ctx.rectangle(cursor_x, y + title_y_off + anim.title_y + title_h * 0.08, title_size * 0.55, title_h * 0.82)
             ctx.set_source_rgba(*title_rgb, anim.title_alpha)
@@ -3306,6 +3351,34 @@ def _make_surface(
     return surface
 
 
+def _draw_test_frame(width, height):
+    """Screen-size test: a red frame along the canvas edges, a cross at its
+    centre and a yellow block in its top-left corner. When the canvas matches
+    the real screen, the frame hugs the screen edges."""
+    def bar(x0, y0, x1, y1):
+        gl.glBegin(GL_QUADS)
+        gl.glVertex2f(x0, y0)
+        gl.glVertex2f(x1, y0)
+        gl.glVertex2f(x1, y1)
+        gl.glVertex2f(x0, y1)
+        gl.glEnd()
+
+    t = max(6.0, min(width, height) / 100.0)
+    cx, cy = width / 2.0, height / 2.0
+    gl.glDisable(GL_TEXTURE_2D)
+    gl.glColor4f(1.0, 0.1, 0.1, 1.0)
+    bar(0, 0, width, t)
+    bar(0, height - t, width, height)
+    bar(0, 0, t, height)
+    bar(width - t, 0, width, height)
+    bar(cx - t * 6, cy - t / 2, cx + t * 6, cy + t / 2)
+    bar(cx - t / 2, cy - t * 6, cx + t / 2, cy + t * 6)
+    gl.glColor4f(1.0, 0.9, 0.1, 1.0)
+    bar(0, 0, t * 5, t * 5)
+    gl.glEnable(GL_TEXTURE_2D)
+    gl.glColor4f(1.0, 1.0, 1.0, 1.0)
+
+
 def _set_cardinal(display, window, name, value=1):
     atom = x11.XInternAtom(display, name.encode("ascii"), 0)
     cardinal = x11.XInternAtom(display, b"CARDINAL", 0)
@@ -3315,7 +3388,8 @@ def _set_cardinal(display, window, name, value=1):
 
 def main():
     _configure_ctypes()
-    title = os.environ.get("FINALLY_TITLE", sys.argv[1] if len(sys.argv) > 1 else "Achievement Unlocked")
+    set_language(os.environ.get("FINALLY_LANG", "en"))
+    title = os.environ.get("FINALLY_TITLE", sys.argv[1] if len(sys.argv) > 1 else tr("Achievement Unlocked"))
     subtitle = os.environ.get("FINALLY_SUBTITLE", sys.argv[2] if len(sys.argv) > 2 else "")
     is_rare = os.environ.get("FINALLY_RARE", "0") == "1"
     seconds = float(os.environ.get("FINALLY_SECONDS", "5.8"))
@@ -3412,6 +3486,12 @@ def main():
             gradient_end = (dr, dg, db, gradient_end[3])
 
     width, height = _display_size()
+    test_frame = os.environ.get("FINALLY_TEST_FRAME", "0") == "1"
+    print(
+        f"canvas {width}x{height} "
+        f"({'fixed by the Popup screen size setting' if os.environ.get('FINALLY_WIDTH') else 'auto-detected from the X display'})",
+        file=sys.stderr,
+    )
 
     _glfw_prefer_x11()
     if not glfw.glfwInit():
@@ -3595,6 +3675,8 @@ def main():
             gl.glTexCoord2f(0, 1)
             gl.glVertex2f(qx, qy + card_height)
             gl.glEnd()
+            if test_frame:
+                _draw_test_frame(width, height)
             glfw.glfwSwapBuffers(win)
             glfw.glfwPollEvents()
 
