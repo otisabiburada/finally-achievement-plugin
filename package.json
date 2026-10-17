@@ -1,6 +1,6 @@
 {
   "name": "finally-achievement-plugin",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Decky Loader plugin: SteamOS achievement popups with an achievement browser and tracker",
   "type": "module",
   "scripts": {

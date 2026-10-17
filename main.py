@@ -57,6 +57,10 @@ ICON_GRAY_MAX_CHROMA = 70
 ICON_COLOR_CHECK_SCRIPT = r"""
 import sys
 
+# Usage: <icon path> <plugin dir>  -> one verdict line.
+#        --serve <plugin dir>      -> one verdict line per icon path read from stdin,
+#                                     so one process can check many icons.
+
 
 def load(path):
     # PyGObject's GdkPixbuf when it works (SteamOS); otherwise the plugin's
@@ -72,29 +76,37 @@ def load(path):
         return shim.GdkPixbuf.Pixbuf.new_from_file_at_scale(path, 32, 32, False)
 
 
-try:
-    pb = load(sys.argv[1])
-    n = pb.get_n_channels(); rs = pb.get_rowstride()
-    w = pb.get_width(); h = pb.get_height()
-    px = pb.get_pixels(); alpha = pb.get_has_alpha() and n >= 4
-    tot = 0; cnt = 0; mx = 0
-    for y in range(h):
-        base = y * rs
-        for x in range(w):
-            i = base + x * n
-            if alpha and px[i + 3] < 32:
-                continue
-            r, g, b = px[i], px[i + 1], px[i + 2]
-            c = max(r, g, b) - min(r, g, b)
-            tot += c; cnt += 1
-            if c > mx:
-                mx = c
-    if cnt == 0:
-        print("unknown")
-    else:
-        print("%.2f %d" % (tot / cnt, mx))
-except Exception:
-    print("unknown")
+def check(path):
+    try:
+        pb = load(path)
+        n = pb.get_n_channels(); rs = pb.get_rowstride()
+        w = pb.get_width(); h = pb.get_height()
+        px = pb.get_pixels(); alpha = pb.get_has_alpha() and n >= 4
+        tot = 0; cnt = 0; mx = 0
+        for y in range(h):
+            base = y * rs
+            for x in range(w):
+                i = base + x * n
+                if alpha and px[i + 3] < 32:
+                    continue
+                r, g, b = px[i], px[i + 1], px[i + 2]
+                c = max(r, g, b) - min(r, g, b)
+                tot += c; cnt += 1
+                if c > mx:
+                    mx = c
+        if cnt == 0:
+            return "unknown"
+        return "%.2f %d" % (tot / cnt, mx)
+    except Exception:
+        return "unknown"
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "--serve":
+    for line in sys.stdin:
+        sys.stdout.write(check(line.rstrip("\n")) + "\n")
+        sys.stdout.flush()
+else:
+    print(check(sys.argv[1]))
 """
 STALE_UNLOCK_GRACE_SECONDS = 15
 POLL_INTERVAL_SECONDS = 0.35
@@ -111,8 +123,16 @@ STEAMWORKS_REFRESH_INTERVAL_MS = 2000
 DESCRIPTION_LOOKUP_SECONDS = 3.0
 # Steam writes appcache/stats/UserGameStats_<account>_<appid>.bin the moment a game stores an unlock, long before
 # the library page data (librarycache) is refreshed. This watcher reads that file directly.
-STATS_BIN_SCAN_INTERVAL_SECONDS = 1.0
+# The stats file is normally caught by inotify the moment Steam writes it; this scan is only the backstop (other
+# Steam roots, or inotify unavailable).
+STATS_BIN_SCAN_INTERVAL_SECONDS = 0.25
 STATS_BIN_NEW_WINDOW_SECONDS = 90          # a file seen for the first time: only unlocks this recent count as new
+# The longest a popup waits for its icon, percentage, description and game art after an unlock is noticed. Whatever
+# isn't ready by then is left out (the lookups finish in the background and are cached for the next popup).
+POPUP_PREP_BUDGET_SECONDS = 1.0
+# When a game starts, this many of its still-locked achievement icons are downloaded ahead of time, so an unlock's
+# popup reads its icon from disk instead of waiting for the network.
+PREWARM_ICON_LIMIT = 400
 DESCRIPTION_MAX_ATTEMPTS = 3
 DUPLICATE_WINDOW_SECONDS = 8.0
 RARE_PERCENT_THRESHOLD = 10.0
@@ -140,6 +160,12 @@ TRACKER_RESTART_COOLDOWN_SECONDS = 5.0
 TRACKER_HIDE_WAIT_SECONDS = 0.55                # tracker slide-out (0.35s) + margin, before a toast window opens
 PROBE_TIMEOUT_SECONDS = 8.0
 FINALLY_ICON_CACHE_DIR = os.path.join(FINALLY_SETTINGS_DIR, "icon-cache")
+# Gray/colored answers for icon files already checked, so an icon is only ever checked once.
+FINALLY_ICON_VERDICTS_FILE = os.path.join(FINALLY_ICON_CACHE_DIR, "color-verdicts.json")
+ICON_CHECK_TIMEOUT_SECONDS = 4.0
+# A display setup the popup couldn't open on is skipped for this long, so later
+# popups don't try it again first (each failed try costs a helper start).
+OVERLAY_FAILED_RETRY_SECONDS = 600.0
 OLD_SETTINGS_DIR = "/home/deck/homebrew/settings/Finally-legacy"
 STEAM_WEB_API_KEY_FILES = [
     os.path.join(FINALLY_SETTINGS_DIR, "steam_web_api_key"),
@@ -431,6 +457,7 @@ class Plugin:
         # Per-game settings profiles (see _settings_for). _active_appid is
         # the game currently running, kept fresh by the Steamworks watcher.
         self._active_appid: Optional[int] = None
+        self._ui_screen: Optional[tuple] = None
         self._local_schema_cache: Dict[str, Tuple[int, Dict[str, str]]] = {}
         # Overlay session detection (see _x_display_candidates).
         self._overlay_display: Optional[str] = None
@@ -459,6 +486,10 @@ class Plugin:
         self._stats_schema_cache: Dict[str, Tuple[int, Dict[str, Any]]] = {}
         self._stats_known: Dict[str, Set[str]] = {}
         self._stats_mtimes: Dict[str, int] = {}
+        # One reader per stats file at a time; a change seen while it runs makes it read the file once more.
+        self._stats_readers: Dict[str, asyncio.Task] = {}
+        self._stats_reread: Set[str] = set()
+        self._prewarmed_appids: Set[int] = set()
         self._stats_bin_task: Optional[asyncio.Task] = None
         self._stats_bin_status: str = "not_started"
         self._stats_bin_unlock_count: int = 0
@@ -474,6 +505,13 @@ class Plugin:
         self._recent_emit_keys: Dict[str, float] = {}
         self._emitted_achievement_keys: Set[str] = set()
         self._gamescope_overlay_lock = asyncio.Lock()
+        # Icon color checks (see _icon_color_verdict): one helper process kept
+        # running for all of them, and the answers remembered per file.
+        self._color_worker: Optional[asyncio.subprocess.Process] = None
+        self._color_worker_lock = asyncio.Lock()
+        self._icon_verdicts: Optional[Dict[str, List[Any]]] = None
+        # (display, X authority) -> when the popup last failed to open on it.
+        self._overlay_failed: Dict[Tuple[str, Optional[str]], float] = {}
         self._gamescope_overlay_status: Optional[str] = None
         self._gamescope_overlay_last_error: Optional[str] = None
         self._achievement_patterns = [
@@ -517,6 +555,7 @@ class Plugin:
         self._stop_event.set()
         self._close_inotify()
         self._stop_steamworks_process()
+        self._stop_color_worker()
 
         tasks = [
             task
@@ -2117,7 +2156,8 @@ class Plugin:
             return None
 
         try:
-            tmp_path = f"{path}.tmp"
+            # Unique per writer: the game-start prewarm and a popup can fetch the same icon at once.
+            tmp_path = f"{path}.{os.getpid()}-{random.getrandbits(32):08x}.tmp"
             with open(tmp_path, "wb") as stream:
                 stream.write(data)
             os.replace(tmp_path, path)
@@ -2342,7 +2382,18 @@ class Plugin:
         for pair in pairs:
             if pair not in unique:
                 unique.append(pair)
-        return unique[:5]
+        unique = unique[:5]
+        # Skip setups that failed recently. If every one did, try just the one
+        # that failed longest ago: still one attempt per popup (so a display
+        # that comes back is found again) instead of all of them.
+        now = time.monotonic()
+        fresh = [
+            pair for pair in unique
+            if now - self._overlay_failed.get(pair, -OVERLAY_FAILED_RETRY_SECONDS) >= OVERLAY_FAILED_RETRY_SECONDS
+        ]
+        if fresh:
+            return fresh
+        return sorted(unique, key=lambda pair: self._overlay_failed.get(pair, 0.0))[:1]
 
     def _x_display_candidates(self) -> List[str]:
         """Displays to try, best first: the one that worked before, the Steam
@@ -3079,10 +3130,30 @@ class Plugin:
     def _screen_env(self, override: Optional[str] = None) -> Dict[str, str]:
         """FINALLY_WIDTH/HEIGHT for the overlay helpers, or nothing for "auto"."""
         choice = (override or self._load_settings().get("overlay_screen") or "auto").strip().lower()
-        if choice not in SCREEN_SIZE_CHOICES or choice == "auto":
+        if choice not in SCREEN_SIZE_CHOICES:
+            choice = "auto"
+        if choice == "auto":
+            # Use the size Steam's own UI reports (sent by the panel). On a TV
+            # the X display can be a different size (e.g. 1280x800 on a 1080p
+            # TV), which put the popups in the wrong place.
+            ui = getattr(self, "_ui_screen", None)
+            if ui:
+                return {"FINALLY_WIDTH": str(ui[0]), "FINALLY_HEIGHT": str(ui[1])}
             return {}
         width, height = choice.split("x")
         return {"FINALLY_WIDTH": width, "FINALLY_HEIGHT": height}
+
+    async def set_ui_screen(self, width: int = 0, height: int = 0) -> None:
+        """The real screen size Steam's UI is drawn at, reported by the panel."""
+        try:
+            w, h = int(width), int(height)
+        except (TypeError, ValueError):
+            return
+        if not (640 <= w <= 7680 and 400 <= h <= 4320):
+            return
+        if getattr(self, "_ui_screen", None) != (w, h):
+            decky.logger.info("UI screen size reported: %sx%s", w, h)
+        self._ui_screen = (w, h)
 
     async def show_screen_frame(self, size: str = "") -> None:
         """Draws a bright frame around the popup canvas (no sound) so you can
@@ -3136,164 +3207,178 @@ class Plugin:
             # while only the first item's visual (and, it turned out, only
             # the first item's sound) actually made it to the screen/speakers.
             # The tracker starts sliding away while the sound's lead-in plays.
-            hide_task = asyncio.create_task(self._tracker_hide_for_toast())
-            played = None if payload.get("test_frame") else await self._play_sound(
-                bool(payload.get("is_rare")),
-                settings,
-                tier=payload.get("tier"),
-                completion=bool(payload.get("completion")),
-            )
-            # The bundled "*_preroll" sounds start with a short silence so the
-            # audible part lines up with the popup, hence the wait. A sound
-            # without that lead-in (yours, or the plain bundled ones) starts
-            # at once, so the popup shouldn't be held back for it.
-            if not (played and "preroll" not in os.path.basename(played).lower()):
-                await asyncio.sleep(AUDIO_PREROLL_SECONDS)
+            # MangoApp is stopped (freeing gamescope's overlay slot) while the
+            # sound's lead-in plays and the tracker slides away, instead of
+            # only after them.
+            slot_task = asyncio.create_task(self._acquire_overlay_slot("toast"))
             try:
-                await hide_task
-            except Exception as err:
-                decky.logger.warning("Tracker hide failed: %s", err)
+                hide_task = asyncio.create_task(self._tracker_hide_for_toast())
+                played = None if payload.get("test_frame") else await self._play_sound(
+                    bool(payload.get("is_rare")),
+                    settings,
+                    tier=payload.get("tier"),
+                    completion=bool(payload.get("completion")),
+                )
+                # The bundled "*_preroll" sounds start with a short silence so the
+                # audible part lines up with the popup, hence the wait. A sound
+                # without that lead-in (yours, or the plain bundled ones) starts
+                # at once, so the popup shouldn't be held back for it.
+                if not (played and "preroll" not in os.path.basename(played).lower()):
+                    await asyncio.sleep(AUDIO_PREROLL_SECONDS)
+                try:
+                    await hide_task
+                except Exception as err:
+                    decky.logger.warning("Tracker hide failed: %s", err)
 
-            env = os.environ.copy()
-            # Decky's bundled libs (LD_LIBRARY_PATH/LD_PRELOAD) can shadow the
-            # system GL/EGL drivers and break GLFW window creation.
-            env.pop("LD_LIBRARY_PATH", None)
-            env.pop("LD_PRELOAD", None)
-            env.update(
-                {
-                    **self._overlay_session_env(),
-                    **self._screen_env(payload.get("screen_override") or None),
-                    "FINALLY_LANG": self._language(),
-                    **(self._fontconfig_env() if self._language() == "zh-Hans" else {}),
-                    "FINALLY_TEST_FRAME": "1" if payload.get("test_frame") else "0",
-                    "FINALLY_TITLE": str(payload.get("title") or "Achievement Unlocked"),
-                    "FINALLY_SUBTITLE": str(payload.get("subtitle") or ""),
-                    "FINALLY_RARE": "1" if payload.get("is_rare") else "0",
-                    "FINALLY_TEMPLATE_COLORS": "1" if settings.get(
-                        "template_colors_enabled", DEFAULT_SETTINGS["template_colors_enabled"]
-                    ) else "0",
-                    "FINALLY_TEMPLATE_FX": "1" if settings.get(
-                        "template_fx_enabled", DEFAULT_SETTINGS["template_fx_enabled"]
-                    ) else "0",
-                    "FINALLY_GAME_NAME": str(payload.get("game_name") or ""),
-                    "FINALLY_TIER": (
-                        str(payload.get("tier"))
-                        if payload.get("tier") in ("uncommon", "rare", "ultra_rare")
-                        else ""
-                    ),
-                    "FINALLY_ICON_PATH": str(payload.get("icon_path") or ""),
-                    "FINALLY_PLACEHOLDER_STYLE": str(
-                        settings.get("placeholder_icon", DEFAULT_SETTINGS["placeholder_icon"])
-                    ),
-                    "FINALLY_GAME_ART_GRADIENT_ENABLED": "1" if settings.get(
-                        "game_art_gradient_enabled", DEFAULT_SETTINGS["game_art_gradient_enabled"]
-                    ) else "0",
-                    "FINALLY_GAME_ART_PATH": str(payload.get("game_art_path") or ""),
-                    "FINALLY_PLACEHOLDER_ICON_PATH": str(payload.get("placeholder_icon_path") or ""),
-                    "FINALLY_PERCENT": (
-                        f"{payload['percent']:.2f}" if isinstance(payload.get("percent"), (int, float)) else ""
-                    ),
-                    "FINALLY_PERCENT_POSITION": str(
-                        settings.get("percent_position", DEFAULT_SETTINGS["percent_position"])
-                    ),
-                    "FINALLY_PERCENT_SIZE": str(
-                        settings.get("percent_size", DEFAULT_SETTINGS["percent_size"])
-                    ),
-                    "FINALLY_PERCENT_ENABLED": "1" if settings.get(
-                        "show_percent", DEFAULT_SETTINGS["show_percent"]
-                    ) else "0",
-                    "FINALLY_SIZE_PERCENT": str(settings.get("overlay_size_percent", 50)),
-                    "FINALLY_POSITION": str(settings.get("overlay_position", DEFAULT_SETTINGS["overlay_position"])),
-                    "FINALLY_TEMPLATE": str(
-                        payload.get("template_override")
-                        or settings.get("overlay_template", DEFAULT_SETTINGS["overlay_template"])
-                    ),
-                    "FINALLY_LABEL_SIZE": str(settings.get("label_font_size", DEFAULT_SETTINGS["label_font_size"])),
-                    "FINALLY_TITLE_SIZE": str(settings.get("title_font_size", DEFAULT_SETTINGS["title_font_size"])),
-                    "FINALLY_SUBTITLE_SIZE": str(settings.get("subtitle_font_size", DEFAULT_SETTINGS["subtitle_font_size"])),
-                    "FINALLY_NORMAL_GRADIENT_START": str(settings.get("normal_gradient_start")),
-                    "FINALLY_NORMAL_GRADIENT_END": str(settings.get("normal_gradient_end")),
-                    "FINALLY_RARE_GRADIENT_START": str(settings.get("rare_gradient_start")),
-                    "FINALLY_RARE_GRADIENT_END": str(settings.get("rare_gradient_end")),
-                    "FINALLY_NORMAL_CIRCLE_COLOR": str(settings.get("normal_circle_color")),
-                    "FINALLY_RARE_CIRCLE_COLOR": str(settings.get("rare_circle_color")),
-                    "FINALLY_SECONDS": str(
-                        max(
-                            float(settings.get("duration_seconds", DEFAULT_SETTINGS["duration_seconds"])),
-                            float(payload.get("min_seconds") or 0.0),
+                env = os.environ.copy()
+                # Decky's bundled libs (LD_LIBRARY_PATH/LD_PRELOAD) can shadow the
+                # system GL/EGL drivers and break GLFW window creation.
+                env.pop("LD_LIBRARY_PATH", None)
+                env.pop("LD_PRELOAD", None)
+                env.update(
+                    {
+                        **self._overlay_session_env(),
+                        **self._screen_env(payload.get("screen_override") or None),
+                        "FINALLY_LANG": self._language(),
+                        **(self._fontconfig_env() if self._language() == "zh-Hans" else {}),
+                        "FINALLY_TEST_FRAME": "1" if payload.get("test_frame") else "0",
+                        "FINALLY_TITLE": str(payload.get("title") or "Achievement Unlocked"),
+                        "FINALLY_SUBTITLE": str(payload.get("subtitle") or ""),
+                        "FINALLY_RARE": "1" if payload.get("is_rare") else "0",
+                        "FINALLY_TEMPLATE_COLORS": "1" if settings.get(
+                            "template_colors_enabled", DEFAULT_SETTINGS["template_colors_enabled"]
+                        ) else "0",
+                        "FINALLY_TEMPLATE_FX": "1" if settings.get(
+                            "template_fx_enabled", DEFAULT_SETTINGS["template_fx_enabled"]
+                        ) else "0",
+                        "FINALLY_GAME_NAME": str(payload.get("game_name") or ""),
+                        "FINALLY_TIER": (
+                            str(payload.get("tier"))
+                            if payload.get("tier") in ("uncommon", "rare", "ultra_rare")
+                            else ""
+                        ),
+                        "FINALLY_ICON_PATH": str(payload.get("icon_path") or ""),
+                        "FINALLY_PLACEHOLDER_STYLE": str(
+                            settings.get("placeholder_icon", DEFAULT_SETTINGS["placeholder_icon"])
+                        ),
+                        "FINALLY_GAME_ART_GRADIENT_ENABLED": "1" if settings.get(
+                            "game_art_gradient_enabled", DEFAULT_SETTINGS["game_art_gradient_enabled"]
+                        ) else "0",
+                        "FINALLY_GAME_ART_PATH": str(payload.get("game_art_path") or ""),
+                        "FINALLY_PLACEHOLDER_ICON_PATH": str(payload.get("placeholder_icon_path") or ""),
+                        "FINALLY_PERCENT": (
+                            f"{payload['percent']:.2f}" if isinstance(payload.get("percent"), (int, float)) else ""
+                        ),
+                        "FINALLY_PERCENT_POSITION": str(
+                            settings.get("percent_position", DEFAULT_SETTINGS["percent_position"])
+                        ),
+                        "FINALLY_PERCENT_SIZE": str(
+                            settings.get("percent_size", DEFAULT_SETTINGS["percent_size"])
+                        ),
+                        "FINALLY_PERCENT_ENABLED": "1" if settings.get(
+                            "show_percent", DEFAULT_SETTINGS["show_percent"]
+                        ) else "0",
+                        "FINALLY_SIZE_PERCENT": str(settings.get("overlay_size_percent", 50)),
+                        "FINALLY_POSITION": str(settings.get("overlay_position", DEFAULT_SETTINGS["overlay_position"])),
+                        "FINALLY_TEMPLATE": str(
+                            payload.get("template_override")
+                            or settings.get("overlay_template", DEFAULT_SETTINGS["overlay_template"])
+                        ),
+                        "FINALLY_LABEL_SIZE": str(settings.get("label_font_size", DEFAULT_SETTINGS["label_font_size"])),
+                        "FINALLY_TITLE_SIZE": str(settings.get("title_font_size", DEFAULT_SETTINGS["title_font_size"])),
+                        "FINALLY_SUBTITLE_SIZE": str(settings.get("subtitle_font_size", DEFAULT_SETTINGS["subtitle_font_size"])),
+                        "FINALLY_NORMAL_GRADIENT_START": str(settings.get("normal_gradient_start")),
+                        "FINALLY_NORMAL_GRADIENT_END": str(settings.get("normal_gradient_end")),
+                        "FINALLY_RARE_GRADIENT_START": str(settings.get("rare_gradient_start")),
+                        "FINALLY_RARE_GRADIENT_END": str(settings.get("rare_gradient_end")),
+                        "FINALLY_NORMAL_CIRCLE_COLOR": str(settings.get("normal_circle_color")),
+                        "FINALLY_RARE_CIRCLE_COLOR": str(settings.get("rare_circle_color")),
+                        "FINALLY_SECONDS": str(
+                            max(
+                                float(settings.get("duration_seconds", DEFAULT_SETTINGS["duration_seconds"])),
+                                float(payload.get("min_seconds") or 0.0),
+                            )
+                        ),
+                        "FINALLY_GLOW_ENABLED": "1" if settings.get(
+                            "icon_glow_enabled", DEFAULT_SETTINGS["icon_glow_enabled"]
+                        ) else "0",
+                        "FINALLY_RING_SIZE": str(
+                            settings.get("ring_size", DEFAULT_SETTINGS["ring_size"])
+                        ),
+                        "FINALLY_GLOW_INTENSITY": str(
+                            settings.get("icon_glow_intensity", DEFAULT_SETTINGS["icon_glow_intensity"])
+                        ),
+                        "FINALLY_GRADIENT_DIRECTION": str(
+                            settings.get("gradient_direction", DEFAULT_SETTINGS["gradient_direction"])
+                        ),
+                        "FINALLY_GLOW_NORMAL": "1" if settings.get(
+                            "glow_normal_enabled", DEFAULT_SETTINGS["glow_normal_enabled"]
+                        ) else "0",
+                        "FINALLY_FRAME_RING_ENABLED": "1" if settings.get(
+                            "icon_frame_ring_enabled", DEFAULT_SETTINGS["icon_frame_ring_enabled"]
+                        ) else "0",
+                        "FINALLY_ICON_GRADIENT_ENABLED": "1" if settings.get(
+                            "icon_gradient_enabled", DEFAULT_SETTINGS["icon_gradient_enabled"]
+                        ) else "0",
+                    }
+                )
+                self._gamescope_overlay_status = "starting"
+                try:
+                    await slot_task
+                    # Try the detected display first; if the helper couldn't reach
+                    # it, try the next candidate (at most three). The one that
+                    # works is remembered for next time.
+                    for display, authority in self._overlay_attempts():
+                        env["DISPLAY"] = display
+                        if authority:
+                            env["XAUTHORITY"] = authority
+                        else:
+                            env.pop("XAUTHORITY", None)
+                        process = await asyncio.create_subprocess_exec(
+                            STEAMWORKS_PYTHON,
+                            helper_path,
+                            env=env,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
                         )
-                    ),
-                    "FINALLY_GLOW_ENABLED": "1" if settings.get(
-                        "icon_glow_enabled", DEFAULT_SETTINGS["icon_glow_enabled"]
-                    ) else "0",
-                    "FINALLY_RING_SIZE": str(
-                        settings.get("ring_size", DEFAULT_SETTINGS["ring_size"])
-                    ),
-                    "FINALLY_GLOW_INTENSITY": str(
-                        settings.get("icon_glow_intensity", DEFAULT_SETTINGS["icon_glow_intensity"])
-                    ),
-                    "FINALLY_GRADIENT_DIRECTION": str(
-                        settings.get("gradient_direction", DEFAULT_SETTINGS["gradient_direction"])
-                    ),
-                    "FINALLY_GLOW_NORMAL": "1" if settings.get(
-                        "glow_normal_enabled", DEFAULT_SETTINGS["glow_normal_enabled"]
-                    ) else "0",
-                    "FINALLY_FRAME_RING_ENABLED": "1" if settings.get(
-                        "icon_frame_ring_enabled", DEFAULT_SETTINGS["icon_frame_ring_enabled"]
-                    ) else "0",
-                    "FINALLY_ICON_GRADIENT_ENABLED": "1" if settings.get(
-                        "icon_gradient_enabled", DEFAULT_SETTINGS["icon_gradient_enabled"]
-                    ) else "0",
-                }
-            )
-            self._gamescope_overlay_status = "starting"
-            try:
-                await self._acquire_overlay_slot("toast")
-                # Try the detected display first; if the helper couldn't reach
-                # it, try the next candidate (at most three). The one that
-                # works is remembered for next time.
-                for display, authority in self._overlay_attempts():
-                    env["DISPLAY"] = display
-                    if authority:
-                        env["XAUTHORITY"] = authority
-                    else:
-                        env.pop("XAUTHORITY", None)
-                    process = await asyncio.create_subprocess_exec(
-                        STEAMWORKS_PYTHON,
-                        helper_path,
-                        env=env,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    stdout, stderr = await process.communicate()
-                    if process.returncode == 0:
-                        if stderr:
-                            decky.logger.info("Popup overlay: %s", stderr.decode("utf-8", errors="replace").strip()[-300:])
-                        self._gamescope_overlay_status = "shown"
-                        self._gamescope_overlay_last_error = None
-                        self._overlay_display = display
-                        self._overlay_xauth = authority
-                        break
-                    stderr_text = stderr.decode("utf-8", errors="replace").strip()
-                    self._gamescope_overlay_status = f"failed:{process.returncode}"
-                    self._gamescope_overlay_last_error = (
-                        f"[DISPLAY={display}{' XAUTHORITY=' + os.path.basename(authority) if authority else ''}] "
-                        + (stderr_text[-440:] or "unknown overlay helper error")
-                    )
-                    decky.logger.warning(
-                        "Gamescope overlay failed on %s rc=%s stdout=%s stderr=%s",
-                        display,
-                        process.returncode,
-                        stdout.decode("utf-8", errors="replace")[-500:],
-                        stderr_text[-500:],
-                    )
-                    if not self._looks_like_display_failure(stderr_text):
-                        break                     # not a display problem: another display won't help
-            except Exception as err:
-                self._gamescope_overlay_status = "failed"
-                self._gamescope_overlay_last_error = str(err)
-                decky.logger.warning("Gamescope overlay failed: %s", err)
+                        stdout, stderr = await process.communicate()
+                        if process.returncode == 0:
+                            if stderr:
+                                decky.logger.info("Popup overlay: %s", stderr.decode("utf-8", errors="replace").strip()[-300:])
+                            self._gamescope_overlay_status = "shown"
+                            self._gamescope_overlay_last_error = None
+                            self._overlay_display = display
+                            self._overlay_xauth = authority
+                            self._overlay_failed.pop((display, authority), None)
+                            break
+                        stderr_text = stderr.decode("utf-8", errors="replace").strip()
+                        self._gamescope_overlay_status = f"failed:{process.returncode}"
+                        self._gamescope_overlay_last_error = (
+                            f"[DISPLAY={display}{' XAUTHORITY=' + os.path.basename(authority) if authority else ''}] "
+                            + (stderr_text[-440:] or "unknown overlay helper error")
+                        )
+                        decky.logger.warning(
+                            "Gamescope overlay failed on %s rc=%s stdout=%s stderr=%s",
+                            display,
+                            process.returncode,
+                            stdout.decode("utf-8", errors="replace")[-500:],
+                            stderr_text[-500:],
+                        )
+                        if not self._looks_like_display_failure(stderr_text):
+                            break                     # not a display problem: another display won't help
+                        self._overlay_failed[(display, authority)] = time.monotonic()
+                        if self._overlay_display == display and self._overlay_xauth == authority:
+                            self._overlay_display = None      # stop putting it first
+                            self._overlay_xauth = None
+                except Exception as err:
+                    self._gamescope_overlay_status = "failed"
+                    self._gamescope_overlay_last_error = str(err)
+                    decky.logger.warning("Gamescope overlay failed: %s", err)
             finally:
+                try:
+                    await slot_task
+                except (Exception, asyncio.CancelledError):
+                    pass
                 # MangoApp comes back only if the tracker isn't holding the slot.
                 await self._release_overlay_slot("toast")
 
@@ -3319,6 +3404,150 @@ class Plugin:
 
         self._recent_emit_keys[dedupe_key] = now
         return False
+
+    @staticmethod
+    def _log_background_failure(task: "asyncio.Future[Any]") -> None:
+        """Done-callback for lookups a popup stopped waiting for: they finish on
+        their own, and a failure is logged instead of going unretrieved."""
+        if task.cancelled():
+            return
+        err = task.exception()
+        if err is not None:
+            decky.logger.warning("Background popup lookup failed: %s", err)
+
+    async def _within_budget(self, awaitable: Any, timeout: float) -> Any:
+        """The awaitable's result, or None if it fails or isn't done within
+        `timeout`. It isn't cancelled on timeout, so a lookup that fills a
+        cache still completes for the next popup."""
+        task = asyncio.ensure_future(awaitable)
+        task.add_done_callback(self._log_background_failure)
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+        except Exception as err:
+            decky.logger.warning("Popup lookup skipped: %s", err)
+            return None
+
+    async def _prepare_popup_icon(
+        self,
+        appid: Optional[int],
+        achievement_id: Optional[str],
+        title: str,
+        subtitle: str,
+        icon_url: Optional[str],
+        state: Dict[str, Optional[str]],
+    ) -> None:
+        """Finds and caches the popup's colored icon. `state` ("path", "url")
+        is updated after every step, so a popup that can't wait any longer
+        still gets the best icon found so far."""
+        icon_url = await self._resolve_authoritative_icon_url(appid, achievement_id, icon_url)
+        state["url"] = icon_url
+        icon_path = await asyncio.to_thread(
+            self._cache_icon, appid, achievement_id, icon_url
+        )
+        if icon_path:
+            state["path"] = icon_path
+
+        if not icon_path and appid is not None and achievement_id:
+            # The fast Steamworks-poll detection path can notice an unlock
+            # within ~100ms -- sometimes faster than Steam's own client
+            # finishes rewriting the local librarycache JSON with that
+            # achievement's icon entry (this matters most for achievements
+            # in a game whose achievements page has never been opened
+            # before, i.e. the very first time this specific JSON gets
+            # populated with icon data at all). A couple of short, bounded
+            # retries catches that without meaningfully delaying the
+            # toast for the common case where the icon was already there.
+            for delay in (0.15, 0.35):
+                await asyncio.sleep(delay)
+                fresh_url = await asyncio.to_thread(
+                    self._achievement_icon_from_cache, appid, achievement_id
+                )
+                if not fresh_url:
+                    continue
+                icon_path = await asyncio.to_thread(
+                    self._cache_icon, appid, achievement_id, fresh_url
+                )
+                if icon_path:
+                    icon_url = fresh_url
+                    state["path"], state["url"] = icon_path, icon_url
+                    break
+
+        if icon_path and appid is not None and achievement_id:
+            # Runs for every source, including the Web API: the schema's
+            # "icon" was seen coming back gray for some (new) games.
+            try:
+                icon_path, icon_url = await self._ensure_colored_icon(
+                    appid, achievement_id, title, subtitle, icon_path, icon_url
+                )
+                state["path"], state["url"] = icon_path, icon_url
+            except Exception as err:
+                decky.logger.warning("Colored-icon check failed, using icon as-is: %s", err)
+
+    def _schedule_prewarm(self, appid: int) -> None:
+        if appid in self._prewarmed_appids:
+            return
+        self._prewarmed_appids.add(appid)
+        task = asyncio.create_task(self._prewarm_game(appid), name="finally-prewarm")
+        task.add_done_callback(self._log_background_failure)
+
+    async def _prewarm_game(self, appid: int) -> None:
+        """Run once when a game starts: fetches what an unlock popup would
+        otherwise download at unlock time (global percentages, the game's
+        icon and art, and the icons of achievements still locked), so the
+        popup can be shown straight from disk."""
+        try:
+            await self._steam_api_global_percentages(appid)
+        except Exception as err:
+            decky.logger.info("Prewarm: percentages for %s unavailable: %s", appid, err)
+
+        icons: Dict[str, str] = {}
+        key = self._steam_api_key()
+        if key:
+            try:
+                icons = dict(await self._steam_api_schema_icons(appid, key))
+            except Exception as err:
+                decky.logger.info("Prewarm: Web API schema for %s unavailable: %s", appid, err)
+        if not icons:
+            try:
+                icons = await asyncio.to_thread(self._local_schema_icon_urls, appid)
+            except Exception as err:
+                decky.logger.info("Prewarm: local schema for %s unavailable: %s", appid, err)
+
+        settings = self._settings_for(appid)
+        needs_art = settings.get("overlay_template") == "game_art" or (
+            settings.get("game_art_gradient_enabled") and not settings.get("template_colors_enabled")
+        )
+
+        def warm() -> int:
+            self._game_icon_path(appid)
+            if needs_art:
+                self._game_art_path(appid)
+            unlocked: Set[str] = set()
+            for directory in self._stats_dirs():
+                for path in glob.glob(os.path.join(directory, f"UserGameStats_*_{appid}.bin")):
+                    unlocked |= set(self._stats_bin_unlocks(appid, path) or {})
+            paths: List[str] = []
+            for aid, url in icons.items():
+                if self._stop_event.is_set() or len(paths) >= PREWARM_ICON_LIMIT:
+                    break
+                if aid in unlocked:
+                    continue
+                path = self._cache_icon(appid, aid, url)
+                if path:
+                    paths.append(path)
+            return paths
+
+        paths = await asyncio.to_thread(warm)
+        # Check their colors now too, so the gray-icon check at unlock time is
+        # a lookup instead of work.
+        for path in paths:
+            if self._stop_event.is_set():
+                break
+            await self._icon_color_verdict(path, persist=False)
+        self._save_icon_verdicts()
+        decky.logger.info("Prewarm for appid=%s done: %s locked achievement icons cached and checked", appid, len(paths))
 
     async def _emit_notification(
         self,
@@ -3392,44 +3621,34 @@ class Plugin:
         if appid is not None and needs_art:
             art_task = asyncio.create_task(asyncio.to_thread(self._game_art_path, appid))
 
-        icon_url = await self._resolve_authoritative_icon_url(appid, achievement_id, icon_url)
-        icon_path = await asyncio.to_thread(
-            self._cache_icon, appid, achievement_id, icon_url
+        # Everything below (icon, percentage, description, game art) gets one
+        # shared time budget. Each used to be awaited in turn with its own
+        # multi-second network timeouts, plus a gray-icon check and retries,
+        # which together held the popup back 10+ seconds after the unlock.
+        # Anything not ready when the budget runs out is left out of this
+        # popup; the lookups keep going in the background and are cached, so
+        # the next popup has them at once.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + POPUP_PREP_BUDGET_SECONDS
+
+        def remaining(floor: float = 0.05) -> float:
+            return max(floor, deadline - loop.time())
+
+        icon_state: Dict[str, Optional[str]] = {"path": None, "url": icon_url}
+        icon_task = asyncio.create_task(
+            self._prepare_popup_icon(appid, achievement_id, title, subtitle, icon_url, icon_state)
         )
-
-        if not icon_path and appid is not None and achievement_id:
-            # The fast Steamworks-poll detection path can notice an unlock
-            # within ~100ms -- sometimes faster than Steam's own client
-            # finishes rewriting the local librarycache JSON with that
-            # achievement's icon entry (this matters most for achievements
-            # in a game whose achievements page has never been opened
-            # before, i.e. the very first time this specific JSON gets
-            # populated with icon data at all). A couple of short, bounded
-            # retries catches that without meaningfully delaying the
-            # toast for the common case where the icon was already there.
-            for delay in (0.15, 0.35):
-                await asyncio.sleep(delay)
-                fresh_url = await asyncio.to_thread(
-                    self._achievement_icon_from_cache, appid, achievement_id
-                )
-                if not fresh_url:
-                    continue
-                icon_path = await asyncio.to_thread(
-                    self._cache_icon, appid, achievement_id, fresh_url
-                )
-                if icon_path:
-                    icon_url = fresh_url
-                    break
-
-        if icon_path and appid is not None and achievement_id:
-            # Runs for every source, including the Web API: the schema's
-            # "icon" was seen coming back gray for some (new) games.
-            try:
-                icon_path, icon_url = await self._ensure_colored_icon(
-                    appid, achievement_id, title, subtitle, icon_path, icon_url
-                )
-            except Exception as err:
-                decky.logger.warning("Colored-icon check failed, using icon as-is: %s", err)
+        icon_task.add_done_callback(self._log_background_failure)
+        try:
+            await asyncio.wait_for(asyncio.shield(icon_task), timeout=remaining())
+        except asyncio.TimeoutError:
+            decky.logger.info(
+                "Popup icon for %s/%s not settled within %.1fs; showing the best one so far",
+                appid, achievement_id, POPUP_PREP_BUDGET_SECONDS,
+            )
+        except Exception as err:
+            decky.logger.warning("Popup icon lookup failed: %s", err)
+        icon_path, icon_url = icon_state["path"], icon_state["url"]
 
         placeholder_style = str(
             early_settings.get("placeholder_icon", DEFAULT_SETTINGS["placeholder_icon"])
@@ -3440,35 +3659,30 @@ class Plugin:
             # icon rather than the generic abstract badge, so the toast
             # still shows something recognizable. (With the "trophy"
             # placeholder chosen, skip this and let the renderer draw it.)
-            icon_path = await asyncio.to_thread(self._game_icon_path, appid)
+            icon_path = await self._within_budget(
+                asyncio.to_thread(self._game_icon_path, appid), remaining(0.25)
+            )
 
         # The "game icon" placeholder is also shown *before* the real icon
         # arrives on templates that crossfade (Xbox 360 v2), so it's needed
         # even when the real icon was found.
         game_art_path = None
         if art_task is not None:
-            try:
-                game_art_path = await asyncio.wait_for(asyncio.shield(art_task), timeout=4.0)
-            except Exception as err:
-                decky.logger.warning("Game art lookup skipped: %s", err)
+            game_art_path = await self._within_budget(art_task, remaining())
 
         placeholder_icon_path = None
         if placeholder_style == "game_icon":
-            placeholder_icon_path = await asyncio.to_thread(self._game_icon_path, appid)
+            placeholder_icon_path = await self._within_budget(
+                asyncio.to_thread(self._game_icon_path, appid), remaining(0.25)
+            )
 
         if percent_task is not None:
-            try:
-                percent = await percent_task
-            except Exception:
-                percent = None
+            percent = await self._within_budget(percent_task, remaining())
 
         if desc_task is not None:
-            try:
-                found = await desc_task
-                if found:
-                    subtitle = found
-            except Exception:
-                pass
+            found = await self._within_budget(desc_task, remaining())
+            if found:
+                subtitle = found
 
         # Rarity tier from the final percentage and the user's cutoffs. When
         # known it decides "rare" styling too, so the label, gold look and
@@ -4033,6 +4247,7 @@ class Plugin:
                         self._end_session()
                     self._active_appid = appid
                     self._game_name(appid)  # warms the name (local now, store in background)
+                    self._schedule_prewarm(appid)  # percentages and icons, so an unlock popup needn't download them
                     process = self._steamworks_process
                     process_dead = process is not None and process.returncode is not None
                     cooldown_active = (
@@ -4423,10 +4638,37 @@ class Plugin:
                 icon_url=icon_url,
             )
 
+    def _schedule_stats_bin(self, path: str, appid: int, source: str) -> None:
+        """Reads a changed UserGameStats file right away, without holding up the watcher that noticed it."""
+        reader = self._stats_readers.get(path)
+        if reader is not None and not reader.done():
+            self._stats_reread.add(path)
+            return
+        self._stats_readers[path] = asyncio.create_task(
+            self._read_stats_bin_changes(path, appid, source), name="finally-stats-bin-read"
+        )
+
+    async def _read_stats_bin_changes(self, path: str, appid: int, source: str) -> None:
+        while not self._stop_event.is_set():
+            self._stats_reread.discard(path)
+            try:
+                self._stats_mtimes[path] = os.stat(path).st_mtime_ns
+            except OSError:
+                pass
+            try:
+                await self._process_stats_bin(path, appid, source=source)
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:
+                self._stats_bin_status = f"error: {err}"
+                decky.logger.warning("Stats file read failed for %s: %s", path, err)
+            if path not in self._stats_reread:
+                return
+
     async def _watch_stats_bin(self) -> None:
-        """Looks for changes of Steam's UserGameStats files once a second (a directory listing: cheap) and reads the one
-        that changed. This is how an unlock is noticed within a second or two on setups where the library data and the
-        game's Steamworks stats are slow to update."""
+        """Backstop for the inotify watcher: looks for changes of Steam's UserGameStats files a few times a second (a
+        directory listing: cheap) and reads the one that changed. Reading this file is how an unlock is noticed at once
+        on setups where the library data and the game's Steamworks stats are slow to update."""
         pattern = self._stats_bin_pattern
         first = True
         while not self._stop_event.is_set():
@@ -4448,7 +4690,7 @@ class Plugin:
                         self._stats_mtimes[entry.path] = stamp
                         if first or previous is None or stamp == previous:
                             continue
-                        await self._process_stats_bin(entry.path, int(match.group("appid")))
+                        self._schedule_stats_bin(entry.path, int(match.group("appid")), "stats_bin")
                 first = False
                 if self._stats_bin_status == "not_started":
                     self._stats_bin_status = "watching"
@@ -4568,34 +4810,84 @@ class Plugin:
     # cache waiting for Steam to swap in the colored hash.
     # ------------------------------------------------------------------
 
-    async def _icon_color_verdict(self, path: Optional[str]) -> str:
-        """"gray", "color" or "unknown" for an icon file. Runs a tiny script
-        under the system python (which has GdkPixbuf, same as the renderer).
-        "unknown" on any failure -- callers treat that as "don't second-guess"."""
-        if not path or not os.path.isfile(path):
+    async def _icon_color_verdict(self, path: Optional[str], persist: bool = True) -> str:
+        """"gray", "color" or "unknown" for an icon file. "unknown" on any
+        failure -- callers treat that as "don't second-guess". A file is
+        checked once: the answer is remembered (on disk too) until the file
+        changes. The check itself runs in a helper under the system python
+        (which has GdkPixbuf, same as the renderer), started once and kept
+        running instead of a new process per icon."""
+        if not path or not os.path.isfile(path) or "\n" in path:
             return "unknown"
-        env = os.environ.copy()
-        env.pop("LD_LIBRARY_PATH", None)
-        env.pop("LD_PRELOAD", None)
         try:
-            process = await asyncio.create_subprocess_exec(
-                STEAMWORKS_PYTHON, "-c", ICON_COLOR_CHECK_SCRIPT, path, decky.DECKY_PLUGIN_DIR,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
-            try:
-                out, _ = await asyncio.wait_for(process.communicate(), timeout=4.0)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-                return "unknown"
-        except Exception as err:
-            decky.logger.warning("Icon color check failed to run: %s", err)
+            st = os.stat(path)
+        except OSError:
             return "unknown"
-        return self._parse_color_verdict(out.decode("utf-8", errors="replace"))
+        verdicts = self._load_icon_verdicts()
+        known = verdicts.get(path)
+        if known and known[0] == st.st_mtime_ns and known[1] == st.st_size:
+            return str(known[2])
+        verdict = self._parse_color_verdict(await self._color_worker_check(path))
+        if verdict != "unknown":
+            verdicts[path] = [st.st_mtime_ns, st.st_size, verdict]
+            if persist:
+                self._save_icon_verdicts()
+        return verdict
+
+    def _load_icon_verdicts(self) -> Dict[str, List[Any]]:
+        if self._icon_verdicts is None:
+            stored = self._read_json_file(FINALLY_ICON_VERDICTS_FILE)
+            self._icon_verdicts = {
+                k: v for k, v in (stored or {}).items()
+                if isinstance(v, list) and len(v) == 3 and os.path.isfile(k)
+            } if isinstance(stored, dict) else {}
+        return self._icon_verdicts
+
+    def _save_icon_verdicts(self) -> None:
+        if self._icon_verdicts is not None:
+            self._write_json_file(FINALLY_ICON_VERDICTS_FILE, dict(self._icon_verdicts))
+
+    def _stop_color_worker(self) -> None:
+        process = self._color_worker
+        self._color_worker = None
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+
+    async def _color_worker_check(self, path: str) -> str:
+        """The helper's raw answer for one icon ("" on failure). A helper that
+        hangs or dies is stopped and a fresh one starts on the next check."""
+        async with self._color_worker_lock:
+            try:
+                process = self._color_worker
+                if process is None or process.returncode is not None:
+                    env = os.environ.copy()
+                    env.pop("LD_LIBRARY_PATH", None)
+                    env.pop("LD_PRELOAD", None)
+                    process = await asyncio.create_subprocess_exec(
+                        STEAMWORKS_PYTHON, "-c", ICON_COLOR_CHECK_SCRIPT, "--serve", decky.DECKY_PLUGIN_DIR,
+                        stdin=asyncio.subprocess.PIPE,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        env=env,
+                    )
+                    self._color_worker = process
+                assert process.stdin is not None and process.stdout is not None
+                process.stdin.write(path.encode("utf-8") + b"\n")
+                await process.stdin.drain()
+                line = await asyncio.wait_for(process.stdout.readline(), timeout=ICON_CHECK_TIMEOUT_SECONDS)
+                if not line:
+                    raise RuntimeError("icon check helper exited")
+                return line.decode("utf-8", errors="replace")
+            except asyncio.CancelledError:
+                self._stop_color_worker()       # it may still owe an answer; don't let it reach the next check
+                raise
+            except Exception as err:
+                decky.logger.warning("Icon color check failed: %s", err)
+                self._stop_color_worker()
+                return ""
 
     @staticmethod
     def _parse_color_verdict(text: str) -> str:
@@ -5136,6 +5428,16 @@ class Plugin:
                     ) == os.path.basename(STEAM_LOG_PATH):
                         await self._read_new_stats_log_lines()
                         continue
+
+                    if event_kind == "appcache_stats_dir":
+                        # Steam rewrites UserGameStats_<account>_<appid>.bin the moment the game stores an unlock:
+                        # read it now instead of waiting for the library cache, which can lag by many seconds.
+                        stats_path = str(event.get("path") or "")
+                        stats_match = self._stats_bin_pattern.match(os.path.basename(stats_path))
+                        if stats_match and mask & (IN_CLOSE_WRITE | IN_MOVED_TO):
+                            self._schedule_stats_bin(
+                                stats_path, int(stats_match.group("appid")), "stats_bin_inotify"
+                            )
 
                     cache_event = self._event_to_cache_path(event)
                     if cache_event is None:

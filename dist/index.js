@@ -4372,8 +4372,31 @@ function StatusPanel() {
     ] })
   ] });
 }
+function startScreenReporter() {
+  let last = "";
+  const report = () => {
+    try {
+      const w = Math.round(window.screen?.width || 0);
+      const h = Math.round(window.screen?.height || 0);
+      const key = `${w}x${h}`;
+      if (w < 640 || h < 400 || key === last) return;
+      last = key;
+      void call("set_ui_screen", w, h).catch(() => {
+        last = "";
+      });
+    } catch {
+    }
+  };
+  report();
+  const timer = window.setInterval(report, 5e3);
+  return () => window.clearInterval(timer);
+}
 var index_default = definePlugin(() => {
+  const stopScreenReporter = startScreenReporter();
   return {
+    onDismount() {
+      stopScreenReporter();
+    },
     name: "Finally Achievement Plugin",
     icon: /* @__PURE__ */ jsx(FaSteam, {}),
     alwaysRender: true,

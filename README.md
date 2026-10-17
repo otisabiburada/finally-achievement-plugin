@@ -11,7 +11,7 @@
   <img alt="Decky Loader" src="https://img.shields.io/badge/Decky%20Loader-plugin-6366f1">
   <img alt="Platform" src="https://img.shields.io/badge/SteamOS-Steam%20Deck-1a9fff">
   <img alt="License" src="https://img.shields.io/badge/license-BSD--3--Clause-green">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.6.2-f59e0b">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.6.3-f59e0b">
 </p>
 
 ---
@@ -273,6 +273,20 @@ plugin, remove it: your pinned achievement, position and size are carried over t
 A popup and tracker template that uses the running game's own artwork as the card background, blurred, under a
 black vignette. Pick **Game Art Blur** in the template list. With no game running (or no artwork found) it falls
 back to a plain dark card with the vignette.
+
+## Near-instant popups and TV placement (v1.6.3)
+
+Reported: the popup appeared 10-15 seconds after the achievement was earned.
+
+- **Why it was late:** the unlock itself was noticed quickly, but before showing the popup the plugin waited, one after another, for the icon download, a check that the icon isn't the gray "locked" one, a fallback icon from the Steam Community page, the unlock percentage, the description and the game art. Each had its own multi-second network timeout, so together they could hold the popup back 10 seconds or more.
+- **One-second budget:** those lookups now run at the same time, and the popup waits for them at most 1 second. Anything not ready by then is left out of that popup; it keeps loading in the background and is saved, so the next popup has it at once.
+- **Unlock read at once:** a change to `UserGameStats_<account>_<appid>.bin` is now read the moment Linux reports it (inotify). Before, that signal was sent to the library data, which lags; the once-a-second scan is now a 0.25-second backup.
+- **Downloaded ahead of time:** when a game starts, its unlock percentages, its icon and art, and the icons of achievements still locked are downloaded, and those icons are checked for gray, so an unlock's popup reads everything from disk.
+- **Cheaper gray-icon check:** it runs in one helper that stays running instead of a new Python process per icon, and each icon's answer is saved in `icon-cache/color-verdicts.json`.
+- **Display retries:** a display setup the popup couldn't open on is skipped for 10 minutes instead of being tried first on every popup. MangoApp is stopped while the unlock sound's lead-in plays instead of after it.
+- **TV placement:** with the popup screen size on "auto", popups use the screen size Steam's own interface reports. On a TV the X display can be a different size (for example 1280x800 on a 1080p TV), which put popups in the wrong place.
+- **Trade-off:** on a slow connection, the first unlock in a game may show without its percentage, or with the game's icon in place of the achievement's. Later unlocks have both.
+- **Not yet confirmed on a Deck:** tested offline with simulated slow lookups (`tests/test_popup_latency.py`): the old code took 8.2 seconds to show the popup there, the new code under 1 second. If a popup is still late, send the plugin log line that starts with `Notification emitted via`.
 
 ## Instant unlock detection and descriptions (v1.6.2)
 

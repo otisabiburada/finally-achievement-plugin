@@ -1844,8 +1844,34 @@ function StatusPanel() {
   );
 }
 
+// Tell the backend how big the screen Steam's UI is drawn on really is. On a
+// TV the X display the popup helper sees can be a different size (for example
+// 1280x800 while the TV shows 1920x1080), which put the popups in the wrong spot.
+function startScreenReporter(): () => void {
+  let last = "";
+  const report = () => {
+    try {
+      const w = Math.round(window.screen?.width || 0);
+      const h = Math.round(window.screen?.height || 0);
+      const key = `${w}x${h}`;
+      if (w < 640 || h < 400 || key === last) return;
+      last = key;
+      void call<[number, number], void>("set_ui_screen", w, h).catch(() => { last = ""; });
+    } catch {
+      /* best effort */
+    }
+  };
+  report();
+  const timer = window.setInterval(report, 5000);
+  return () => window.clearInterval(timer);
+}
+
 export default definePlugin(() => {
+  const stopScreenReporter = startScreenReporter();
   return {
+    onDismount() {
+      stopScreenReporter();
+    },
     name: "Finally Achievement Plugin",
     icon: <FaSteam />,
     alwaysRender: true,
