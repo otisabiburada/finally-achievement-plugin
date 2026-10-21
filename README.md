@@ -2,46 +2,61 @@
   <img src="docs/images/banner.png" alt="Finally Achievement Plugin" width="100%">
 </p>
 
+<h1 align="center">Finally Achievement Plugin</h1>
+
 <p align="center">
-  <b>Achievement popups for Steam Deck &amp; SteamOS, built for Decky Loader.</b><br>
-  18 popup templates, rarity tiers with their own sounds, an achievement browser and an on-screen tracker.
+  <b>Console-style achievement popups for Steam Deck, right in Gaming Mode.</b><br>
+  Pick a look, hear a sound that fits how rare the unlock was, and keep track of what is left.
 </p>
 
 <p align="center">
   <img alt="Decky Loader" src="https://img.shields.io/badge/Decky%20Loader-plugin-6366f1">
   <img alt="Platform" src="https://img.shields.io/badge/SteamOS-Steam%20Deck-1a9fff">
   <img alt="License" src="https://img.shields.io/badge/license-BSD--3--Clause-green">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.6.3-f59e0b">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.7.0-f59e0b">
+</p>
+
+<p align="center">
+  <video src="https://github.com/otisabiburada/finally-achievement-plugin/raw/main/docs/demo.mp4" controls muted loop playsinline width="80%"></video>
+  <br>
+  <sub>If the video does not play here, <a href="docs/demo.mp4">open the demo clip</a>.</sub>
 </p>
 
 ---
 
-# Finally Achievement Plugin
+Steam on the Deck unlocks achievements quietly. **Finally Achievement Plugin** fixes that: the moment you unlock one, a popup slides in over your game with its real icon, name, description and how few players have it. Rare unlocks look and sound different, so you notice the ones that matter.
 
-Finally Achievement Plugin shows a popup in-game every time you unlock a Steam achievement, with sounds that change by rarity. It also lets you browse every achievement of the game you are playing and pin one on screen as a tracker.
+## What you get
 
-## Highlights
-
-- **18 popup templates**: modern, glass, retro arcade, terminal, game-art blur and more. Pick colors, size and position.
-- **Rarity tiers**: common, uncommon, rare and ultra rare popups, each with its own bundled sound. Drop in your own `.wav`, `.flac`, `.ogg` or `.mp3`.
-- **Real achievement icons** from Steam when available.
-- **Achievement browser**: see locked and unlocked achievements with rarity and unlock dates. Secret ones stay hidden until unlocked.
-- **On-screen tracker**: pin an achievement and follow its progress while you play. It uses your popup look.
-- **Per-game settings** for sounds and style.
-- **Fast local detection** on SteamOS, with an optional Steam Web API fallback.
-- **Test buttons** in Decky to preview every popup and sound.
+| | |
+|---|---|
+| **19 popup templates** | Xbox, Xbox 360, a **PS3 trophy bar**, Steam, Material, retro arcade, terminal, glass, game-art blur and more. Your colors, size, position and timing. |
+| **Live preview** | The Decky panel plays the selected template as a looping animation, so you can see a change without waiting for a test popup. |
+| **Rarity tiers** | Common, uncommon, rare and ultra rare popups, each with its own sound. Add your own `.wav`, `.flac`, `.ogg` or `.mp3`. |
+| **Screenshot on unlock** | Optional. Saves a picture of your game (or of the game with the popup) every time you unlock something. |
+| **Achievement browser** | Every achievement of the running game, locked and unlocked, with rarity and unlock date. Secret ones stay hidden until unlocked. |
+| **On-screen tracker** | Pin an achievement and follow it while you play, in the same look as your popups. |
+| **Per-game settings** | A different style or sound for a particular game. |
+| **Milestones and history** | 100% completion popup, "only 2 left" alerts, a session summary and an unlock history with shareable cards. |
+| **Fast and local** | Unlocks are read from Steam's own files within about a second. No account or API key needed (a Steam Web API key is an optional fallback). |
+| **9 languages** | English, Turkish, German, French, Spanish, Brazilian Portuguese, Russian, Polish and Simplified Chinese, following your Steam language. |
 
 <p align="center">
   <img src="docs/images/popups.png" alt="Popup templates and rarity tiers" width="90%">
 </p>
 
-## Browser and tracker preview
-
 <p align="center">
   <img src="docs/images/browser.png" alt="Achievement browser and tracker" width="90%">
 </p>
 
-> The images above are illustrative mockups. Real screenshots from the Steam Deck can replace them in `docs/images/`.
+> The two images above are illustrative mockups. The video at the top is a real clip.
+
+## Quick start
+
+1. Install [Decky Loader](https://decky.xyz) on your Steam Deck.
+2. Install this plugin (see [Install](#install-finally-achievement-plugin) below, about 5 minutes).
+3. Open the Decky menu, choose **Finally Achievement Plugin**, pick a template under *Appearance* and watch the preview.
+4. Play. Your next unlock shows up with the popup you picked.
 
 ## What You Need
 
@@ -273,6 +288,12 @@ plugin, remove it: your pinned achievement, position and size are carried over t
 A popup and tracker template that uses the running game's own artwork as the card background, blurred, under a
 black vignette. Pick **Game Art Blur** in the template list. With no game running (or no artwork found) it falls
 back to a plain dark card with the vignette.
+
+## Template preview, PS3 Trophy and screenshots (v1.7.0)
+
+- **Preview in the panel.** Under *Popup template* the panel plays a looping animation of the whole popup (entrance, hold and exit) for the selected template, drawn by the same renderer as the real popup with your colors, fonts and options. It takes a second or two to redraw after a change. *Preview as* switches between a common, uncommon, rare and ultra rare unlock. With a game running, its icon is used. The Test buttons still play the full popup.
+- **PS3 Trophy template.** A dark, glossy rounded bar in the top right corner: the trophy picture on the left, name and description beside it, and a small cup on the right in the trophy's grade colour (common bronze, uncommon silver, rare gold, ultra rare platinum). It is drawn from scratch, not copied from Sony artwork.
+- **Screenshot on unlock.** Turn it on under *Screenshot*. Pictures go to `Pictures/Finally Achievements/Screenshots` (the newest 500 are kept). By default the picture is the game at the moment of the unlock; *Include the popup* takes it a moment later so the popup is in it. *Test screenshot* takes one now. It asks gamescope for the picture, so it works in Game Mode.
 
 ## Near-instant popups and TV placement (v1.6.3)
 

@@ -41,6 +41,8 @@ export type FinallySettings = {
   percent_position: PercentPosition;
   rarity_tiers_enabled: boolean;
   test_with_game_data: boolean;
+  screenshot_on_unlock: boolean;
+  screenshot_include_popup: boolean;
   template_fx_enabled: boolean;
   template_colors_enabled: boolean;
   tracker_position: TrackerPosition;
@@ -106,6 +108,19 @@ export const SOUND_SLOT_OPTIONS: { slot: SoundSlot; label: string; description: 
   { slot: "ultra_rare", label: "Ultra rare sound", description: "Needs Rarity Tiers on; otherwise the rare sound plays." },
   { slot: "completion", label: "Completionist sound", description: "The popup for unlocking every achievement in a game." },
 ];
+
+// Which kind of unlock the template preview in the panel shows.
+export type PreviewTier = "common" | "uncommon" | "rare" | "ultra_rare";
+
+export const PREVIEW_TIER_OPTIONS: { data: PreviewTier; label: string }[] = [
+  { data: "common", label: "Common" },
+  { data: "uncommon", label: "Uncommon" },
+  { data: "rare", label: "Rare" },
+  { data: "ultra_rare", label: "Ultra rare" },
+];
+
+export type TemplatePreviewResponse = { ok: boolean; image?: string; error?: string; template?: string };
+export type ScreenshotResponse = { ok: boolean; path?: string; error?: string };
 
 export type SoundEntry = { name: string; source: "builtin" | "user" };
 export type SoundsResponse = { folder: string; extensions: string[]; sounds: SoundEntry[] };
@@ -178,6 +193,7 @@ export const OVERLAY_SCREEN_OPTIONS: { data: OverlayScreen; label: string }[] = 
 export type OverlayTemplate =
   | "xbox_modern"
   | "playstation_trophy"
+  | "ps3_trophy"
   | "switch_bold"
   | "steam_flat"
   | "material_minimal"
@@ -198,6 +214,7 @@ export type OverlayTemplate =
 export const OVERLAY_TEMPLATE_OPTIONS: { data: OverlayTemplate; label: string }[] = [
   { data: "xbox_modern", label: "Xbox Modern" },
   { data: "playstation_trophy", label: "Trophy Case" },
+  { data: "ps3_trophy", label: "PS3 Trophy" },
   { data: "switch_bold", label: "Handheld Bold" },
   { data: "steam_flat", label: "Steam Flat" },
   { data: "material_minimal", label: "Material Minimal" },
@@ -273,6 +290,8 @@ export const DEFAULT_SETTINGS: FinallySettings = {
   percent_position: "bottom_right",
   rarity_tiers_enabled: true,
   test_with_game_data: true,
+  screenshot_on_unlock: false,
+  screenshot_include_popup: false,
   template_fx_enabled: true,
   template_colors_enabled: false,
   tracker_position: "top_right",

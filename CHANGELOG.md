@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0
+- The panel shows a preview of the selected popup template under the template picker, an animated loop of the whole popup, drawn by the popup renderer itself (the slide in from the screen edge is not part of it). *Preview as* picks common, uncommon, rare or ultra rare. The Test buttons stay.
+- New template: PS3 Trophy (top right, glossy dark bar, trophy picture, grade-coloured cup).
+- New option: screenshot on unlock (off by default), with *Include the popup* and a *Test screenshot* button. Saved to `Pictures/Finally Achievements/Screenshots`.
+- The popup's environment settings now come from one function shared by the popup and the preview.
+- The panel title is one line, so it no longer covers the *Show* dropdown.
+- New `finally_screenshot.py` helper and `tests/test_screenshot_preview.py`.
+
 ## 1.6.3
 - Popups appear right after an unlock instead of 10-15 seconds later. The icon, unlock percentage, description and game art now share a 1-second budget; anything slower is left out of that popup and cached for the next one. Before, each was awaited in turn with multi-second network timeouts, a gray-icon check and retries.
 - A change to Steam's `UserGameStats` file is read the moment inotify reports it (the 1-second scan is now a 0.25-second backstop). Before, the inotify event went to the library cache, which lags.

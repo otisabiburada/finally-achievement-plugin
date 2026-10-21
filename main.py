@@ -225,6 +225,8 @@ DEFAULT_SETTINGS = {
     "percent_position": "bottom_right",
     "rarity_tiers_enabled": True,
     "test_with_game_data": True,
+    "screenshot_on_unlock": False,
+    "screenshot_include_popup": False,
     "template_fx_enabled": True,
     "template_colors_enabled": False,
     "tracker_position": "top_right",
@@ -265,6 +267,17 @@ SESSION_END_SECONDS = 4.0
 MILESTONE_MIN_SECONDS = 6.0
 HISTORY_MAX_ENTRIES = 500
 SHARE_DIR_NAME = "Finally Achievements"
+# Screenshot on unlock: gamescope writes the picture it is asked for to this fixed path, then it is copied
+# to <Pictures>/Finally Achievements/Screenshots.
+SCREENSHOT_HELPER_NAME = "finally_screenshot.py"
+GAMESCOPE_SCREENSHOT_PATH = "/tmp/gamescope.png"
+SCREENSHOT_DIR_NAME = "Screenshots"
+SCREENSHOT_WAIT_SECONDS = 4.0
+SCREENSHOT_KEEP_MAX = 500            # newest files kept in the screenshots folder
+# Preview image of the popup template shown in the panel.
+PREVIEW_TIMEOUT_SECONDS = 30.0
+PREVIEW_CACHE_MAX = 6
+PREVIEW_MAX_BYTES = 8_000_000
 COMPLETION_DELAY_SECONDS = 2.0
 COMPLETION_DEDUPE_SECONDS = 120.0
 # "auto" = original behavior (game icon if no achievement icon, else the gear badge).
@@ -291,6 +304,7 @@ OVERLAY_POSITIONS = (
 OVERLAY_TEMPLATES = (
     "xbox_modern",
     "playstation_trophy",
+    "ps3_trophy",
     "switch_bold",
     "steam_flat",
     "material_minimal",
@@ -505,6 +519,8 @@ class Plugin:
         self._recent_emit_keys: Dict[str, float] = {}
         self._emitted_achievement_keys: Set[str] = set()
         self._gamescope_overlay_lock = asyncio.Lock()
+        self._screenshot_lock = asyncio.Lock()
+        self._preview_cache: Dict[str, str] = {}
         # Icon color checks (see _icon_color_verdict): one helper process kept
         # running for all of them, and the answers remembered per file.
         self._color_worker: Optional[asyncio.subprocess.Process] = None
@@ -1385,6 +1401,228 @@ class Plugin:
             return {"ok": False, "error": str(err)}
         return {"ok": True, "path": path}
 
+    def _start_background(self, coroutine: Any) -> None:
+        task = asyncio.create_task(coroutine)
+        task.add_done_callback(self._log_background_failure)
+
+    # ------------------------------------------------------------------
+    # Screenshot on unlock
+    # ------------------------------------------------------------------
+    def _screenshot_dir(self) -> str:
+        return os.path.join(self._share_dir(), SCREENSHOT_DIR_NAME)
+
+    @staticmethod
+    def _looks_like_complete_png(path: str) -> bool:
+        try:
+            size = os.path.getsize(path)
+            if size < 1000:
+                return False
+            with open(path, "rb") as stream:
+                head = stream.read(8)
+                stream.seek(-12, os.SEEK_END)
+                tail = stream.read(12)
+            return head == b"\x89PNG\r\n\x1a\n" and tail[4:8] == b"IEND"
+        except OSError:
+            return False
+
+    async def _request_gamescope_screenshot(self, include_popup: bool) -> Optional[str]:
+        """Asks gamescope for a screenshot. Returns an error text, or None once the request was sent."""
+        helper_path = os.path.join(decky.DECKY_PLUGIN_DIR, SCREENSHOT_HELPER_NAME)
+        if not os.path.exists(helper_path):
+            return f"missing helper: {helper_path}"
+        env = os.environ.copy()
+        env.pop("LD_LIBRARY_PATH", None)
+        env.pop("LD_PRELOAD", None)
+        env["XDG_RUNTIME_DIR"] = self._runtime_dir()
+        last_error = "no display to ask"
+        for display, authority in self._overlay_attempts():
+            env["DISPLAY"] = display
+            if authority:
+                env["XAUTHORITY"] = authority
+            else:
+                env.pop("XAUTHORITY", None)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    STEAMWORKS_PYTHON, helper_path, "2" if include_popup else "1",
+                    env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                _out, err = await asyncio.wait_for(process.communicate(), timeout=6.0)
+            except (asyncio.TimeoutError, OSError) as exc:
+                last_error = str(exc) or "screenshot request timed out"
+                continue
+            if process.returncode == 0:
+                return None
+            last_error = err.decode("utf-8", errors="replace").strip()[-200:] or f"helper exit {process.returncode}"
+        return last_error
+
+    def _prune_screenshots(self, directory: str) -> None:
+        try:
+            files = [
+                os.path.join(directory, name) for name in os.listdir(directory)
+                if name.lower().endswith(".png")
+            ]
+            if len(files) <= SCREENSHOT_KEEP_MAX:
+                return
+            files.sort(key=lambda f: os.path.getmtime(f))
+            for old in files[: len(files) - SCREENSHOT_KEEP_MAX]:
+                os.unlink(old)
+        except OSError:
+            pass
+
+    async def take_screenshot_now(self, label: str = "", include_popup: bool = False) -> Dict[str, Any]:
+        """Takes one screenshot of the screen and saves it. Returns {"ok", "path"} or {"ok": False, "error"}."""
+        async with self._screenshot_lock:
+            try:
+                os.unlink(GAMESCOPE_SCREENSHOT_PATH)       # so a leftover picture can't be mistaken for the new one
+            except FileNotFoundError:
+                pass
+            except OSError as err:
+                decky.logger.info("Old screenshot file not removed: %s", err)
+            started = time.time()
+            error = await self._request_gamescope_screenshot(include_popup)
+            if error:
+                return {"ok": False, "error": error}
+            deadline = time.monotonic() + SCREENSHOT_WAIT_SECONDS
+            while time.monotonic() < deadline:
+                await asyncio.sleep(0.2)
+                try:
+                    fresh = os.path.getmtime(GAMESCOPE_SCREENSHOT_PATH) >= started - 1.0
+                except OSError:
+                    continue
+                if fresh and self._looks_like_complete_png(GAMESCOPE_SCREENSHOT_PATH):
+                    break
+            else:
+                return {"ok": False, "error": "Gamescope did not write a screenshot (are you in Game Mode?)"}
+
+            safe = re.sub(r"[^A-Za-z0-9._ -]+", "_", str(label))[:80].strip("._ ") or "achievement"
+            stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            directory = self._screenshot_dir()
+            try:
+                os.makedirs(directory, exist_ok=True)
+                path = os.path.join(directory, f"{safe}-{stamp}.png")
+                with open(GAMESCOPE_SCREENSHOT_PATH, "rb") as src, open(path, "wb") as dst:
+                    dst.write(src.read())
+                try:
+                    home = getattr(decky, "DECKY_USER_HOME", None) or "/home/deck"
+                    st = os.stat(home)
+                    for target in (os.path.dirname(directory), directory, path):
+                        os.chown(target, st.st_uid, st.st_gid)
+                except OSError:
+                    pass
+            except OSError as err:
+                return {"ok": False, "error": str(err)}
+            self._prune_screenshots(directory)
+            return {"ok": True, "path": path}
+
+    async def _screenshot_for_unlock(self, payload: Dict[str, Any], delay: float, include_popup: bool) -> None:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        game = str(payload.get("game_name") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        label = " - ".join(part for part in (game, title) if part) or "achievement"
+        result = await self.take_screenshot_now(label, include_popup)
+        if result.get("ok"):
+            decky.logger.info("Unlock screenshot saved: %s", result.get("path"))
+        else:
+            decky.logger.warning("Unlock screenshot failed: %s", result.get("error"))
+
+    async def test_screenshot(self) -> Dict[str, Any]:
+        """The panel's test button: one screenshot right now, with the popup included if that option is on."""
+        settings = self._effective_settings()
+        return await self.take_screenshot_now("test", bool(settings.get("screenshot_include_popup")))
+
+    # ------------------------------------------------------------------
+    # Template preview for the panel
+    # ------------------------------------------------------------------
+    async def get_template_preview(self, template: str = "", tier: str = "common") -> Dict[str, Any]:
+        """An animated PNG (as a data URI) of the whole popup in the chosen template, drawn by the same
+        renderer as the real popup, with the current colors, fonts and options. `template` previews a template
+        without saving it; `tier` is common, uncommon, rare or ultra_rare."""
+        import tempfile
+
+        helper_path = os.path.join(decky.DECKY_PLUGIN_DIR, FINALLY_OVERLAY_HELPER_NAME)
+        if not os.path.exists(helper_path):
+            return {"ok": False, "error": "missing helper"}
+        if tier not in ("common", "uncommon", "rare", "ultra_rare"):
+            tier = "common"
+        settings = self._effective_settings()
+        chosen = str(template or "").strip().lower()
+        if chosen not in OVERLAY_TEMPLATES:
+            chosen = str(settings.get("overlay_template") or DEFAULT_SETTINGS["overlay_template"])
+        title, subtitle = (self._tr(text) for text in self.TEST_TIER_SAMPLES[tier])
+        icon_path = None
+        if self._active_appid is not None:
+            icon_path = await self._within_budget(
+                asyncio.to_thread(self._game_icon_path, self._active_appid), 1.0
+            )
+        payload = {
+            "title": title,
+            "subtitle": subtitle,
+            "is_rare": tier in ("rare", "ultra_rare"),
+            "tier": None if tier == "common" else tier,
+            "percent": self._sample_percent_for_tier(tier, settings),
+            "icon_path": icon_path,
+            "placeholder_icon_path": icon_path,
+            "template_override": chosen,
+            "settings_appid": self._active_appid,
+        }
+        game_art = None
+        if self._active_appid is not None and (
+            chosen == "game_art" or (settings.get("game_art_gradient_enabled") and not settings.get("template_colors_enabled"))
+        ):
+            game_art = await self._within_budget(asyncio.to_thread(self._game_art_path, self._active_appid), 1.0)
+        payload["game_art_path"] = game_art
+        env_vars = self._overlay_env_vars(settings, payload)
+        env_vars["FINALLY_GAME_NAME"] = ""
+        # Same inputs, same picture: reuse the last one.
+        cache_key = hashlib.sha1(
+            json.dumps(
+                [sorted(env_vars.items()), [os.path.getmtime(f) if f and os.path.exists(f) else 0 for f in (icon_path, game_art)]],
+                sort_keys=True, default=str,
+            ).encode()
+        ).hexdigest()
+        cached = self._preview_cache.get(cache_key)
+        if cached:
+            return {"ok": True, "image": cached, "template": chosen}
+
+        fd, out_path = tempfile.mkstemp(suffix=".png", prefix="finally-preview-")
+        os.close(fd)
+        try:
+            env = os.environ.copy()
+            env.pop("LD_LIBRARY_PATH", None)
+            env.pop("LD_PRELOAD", None)
+            env.update(env_vars)
+            env["FINALLY_PREVIEW_PATH"] = out_path
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    STEAMWORKS_PYTHON, helper_path,
+                    env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                _out, err = await asyncio.wait_for(process.communicate(), timeout=PREVIEW_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError:
+                return {"ok": False, "error": "preview timed out"}
+            except OSError as exc:
+                return {"ok": False, "error": str(exc)}
+            if process.returncode != 0:
+                return {"ok": False, "error": err.decode("utf-8", errors="replace").strip()[-300:] or f"exit {process.returncode}"}
+            try:
+                with open(out_path, "rb") as stream:
+                    raw = stream.read()
+            except OSError as exc:
+                return {"ok": False, "error": str(exc)}
+            if raw[:8] != b"\x89PNG\r\n\x1a\n" or len(raw) > PREVIEW_MAX_BYTES:
+                return {"ok": False, "error": "preview was not a picture"}
+            image = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+            if len(self._preview_cache) >= PREVIEW_CACHE_MAX:
+                self._preview_cache.pop(next(iter(self._preview_cache)))
+            self._preview_cache[cache_key] = image
+            return {"ok": True, "image": image, "template": chosen}
+        finally:
+            try:
+                os.unlink(out_path)
+            except OSError:
+                pass
+
     async def test_completion_popup(self) -> None:
         await self._emit_completion_toast(self._active_appid, delay=0.0)
 
@@ -1767,6 +2005,12 @@ class Plugin:
         )
         settings["test_with_game_data"] = bool(
             raw_settings.get("test_with_game_data", DEFAULT_SETTINGS["test_with_game_data"])
+        )
+        settings["screenshot_on_unlock"] = bool(
+            raw_settings.get("screenshot_on_unlock", DEFAULT_SETTINGS["screenshot_on_unlock"])
+        )
+        settings["screenshot_include_popup"] = bool(
+            raw_settings.get("screenshot_include_popup", DEFAULT_SETTINGS["screenshot_include_popup"])
         )
         settings["rarity_tiers_enabled"] = bool(
             raw_settings.get("rarity_tiers_enabled", DEFAULT_SETTINGS["rarity_tiers_enabled"])
@@ -3192,6 +3436,94 @@ class Plugin:
             except Exception as err:
                 decky.logger.warning("Tracker show after toast failed: %s", err)
 
+    def _overlay_env_vars(self, settings: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, str]:
+        """Everything the popup renderer reads from its environment, for one popup."""
+        return {
+            **self._overlay_session_env(),
+            **self._screen_env(payload.get("screen_override") or None),
+            "FINALLY_LANG": self._language(),
+            **(self._fontconfig_env() if self._language() == "zh-Hans" else {}),
+            "FINALLY_TEST_FRAME": "1" if payload.get("test_frame") else "0",
+            "FINALLY_TITLE": str(payload.get("title") or "Achievement Unlocked"),
+            "FINALLY_SUBTITLE": str(payload.get("subtitle") or ""),
+            "FINALLY_RARE": "1" if payload.get("is_rare") else "0",
+            "FINALLY_TEMPLATE_COLORS": "1" if settings.get(
+                "template_colors_enabled", DEFAULT_SETTINGS["template_colors_enabled"]
+            ) else "0",
+            "FINALLY_TEMPLATE_FX": "1" if settings.get(
+                "template_fx_enabled", DEFAULT_SETTINGS["template_fx_enabled"]
+            ) else "0",
+            "FINALLY_GAME_NAME": str(payload.get("game_name") or ""),
+            "FINALLY_TIER": (
+                str(payload.get("tier"))
+                if payload.get("tier") in ("uncommon", "rare", "ultra_rare")
+                else ""
+            ),
+            "FINALLY_ICON_PATH": str(payload.get("icon_path") or ""),
+            "FINALLY_PLACEHOLDER_STYLE": str(
+                settings.get("placeholder_icon", DEFAULT_SETTINGS["placeholder_icon"])
+            ),
+            "FINALLY_GAME_ART_GRADIENT_ENABLED": "1" if settings.get(
+                "game_art_gradient_enabled", DEFAULT_SETTINGS["game_art_gradient_enabled"]
+            ) else "0",
+            "FINALLY_GAME_ART_PATH": str(payload.get("game_art_path") or ""),
+            "FINALLY_PLACEHOLDER_ICON_PATH": str(payload.get("placeholder_icon_path") or ""),
+            "FINALLY_PERCENT": (
+                f"{payload['percent']:.2f}" if isinstance(payload.get("percent"), (int, float)) else ""
+            ),
+            "FINALLY_PERCENT_POSITION": str(
+                settings.get("percent_position", DEFAULT_SETTINGS["percent_position"])
+            ),
+            "FINALLY_PERCENT_SIZE": str(
+                settings.get("percent_size", DEFAULT_SETTINGS["percent_size"])
+            ),
+            "FINALLY_PERCENT_ENABLED": "1" if settings.get(
+                "show_percent", DEFAULT_SETTINGS["show_percent"]
+            ) else "0",
+            "FINALLY_SIZE_PERCENT": str(settings.get("overlay_size_percent", 50)),
+            "FINALLY_POSITION": str(settings.get("overlay_position", DEFAULT_SETTINGS["overlay_position"])),
+            "FINALLY_TEMPLATE": str(
+                payload.get("template_override")
+                or settings.get("overlay_template", DEFAULT_SETTINGS["overlay_template"])
+            ),
+            "FINALLY_LABEL_SIZE": str(settings.get("label_font_size", DEFAULT_SETTINGS["label_font_size"])),
+            "FINALLY_TITLE_SIZE": str(settings.get("title_font_size", DEFAULT_SETTINGS["title_font_size"])),
+            "FINALLY_SUBTITLE_SIZE": str(settings.get("subtitle_font_size", DEFAULT_SETTINGS["subtitle_font_size"])),
+            "FINALLY_NORMAL_GRADIENT_START": str(settings.get("normal_gradient_start")),
+            "FINALLY_NORMAL_GRADIENT_END": str(settings.get("normal_gradient_end")),
+            "FINALLY_RARE_GRADIENT_START": str(settings.get("rare_gradient_start")),
+            "FINALLY_RARE_GRADIENT_END": str(settings.get("rare_gradient_end")),
+            "FINALLY_NORMAL_CIRCLE_COLOR": str(settings.get("normal_circle_color")),
+            "FINALLY_RARE_CIRCLE_COLOR": str(settings.get("rare_circle_color")),
+            "FINALLY_SECONDS": str(
+                max(
+                    float(settings.get("duration_seconds", DEFAULT_SETTINGS["duration_seconds"])),
+                    float(payload.get("min_seconds") or 0.0),
+                )
+            ),
+            "FINALLY_GLOW_ENABLED": "1" if settings.get(
+                "icon_glow_enabled", DEFAULT_SETTINGS["icon_glow_enabled"]
+            ) else "0",
+            "FINALLY_RING_SIZE": str(
+                settings.get("ring_size", DEFAULT_SETTINGS["ring_size"])
+            ),
+            "FINALLY_GLOW_INTENSITY": str(
+                settings.get("icon_glow_intensity", DEFAULT_SETTINGS["icon_glow_intensity"])
+            ),
+            "FINALLY_GRADIENT_DIRECTION": str(
+                settings.get("gradient_direction", DEFAULT_SETTINGS["gradient_direction"])
+            ),
+            "FINALLY_GLOW_NORMAL": "1" if settings.get(
+                "glow_normal_enabled", DEFAULT_SETTINGS["glow_normal_enabled"]
+            ) else "0",
+            "FINALLY_FRAME_RING_ENABLED": "1" if settings.get(
+                "icon_frame_ring_enabled", DEFAULT_SETTINGS["icon_frame_ring_enabled"]
+            ) else "0",
+            "FINALLY_ICON_GRADIENT_ENABLED": "1" if settings.get(
+                "icon_gradient_enabled", DEFAULT_SETTINGS["icon_gradient_enabled"]
+            ) else "0",
+        }
+
     async def _show_gamescope_overlay_locked(self, payload: Dict[str, Any], helper_path: str) -> None:
         async with self._gamescope_overlay_lock:
             settings = self._settings_for(payload.get("settings_appid"))
@@ -3235,99 +3567,18 @@ class Plugin:
                 # system GL/EGL drivers and break GLFW window creation.
                 env.pop("LD_LIBRARY_PATH", None)
                 env.pop("LD_PRELOAD", None)
-                env.update(
-                    {
-                        **self._overlay_session_env(),
-                        **self._screen_env(payload.get("screen_override") or None),
-                        "FINALLY_LANG": self._language(),
-                        **(self._fontconfig_env() if self._language() == "zh-Hans" else {}),
-                        "FINALLY_TEST_FRAME": "1" if payload.get("test_frame") else "0",
-                        "FINALLY_TITLE": str(payload.get("title") or "Achievement Unlocked"),
-                        "FINALLY_SUBTITLE": str(payload.get("subtitle") or ""),
-                        "FINALLY_RARE": "1" if payload.get("is_rare") else "0",
-                        "FINALLY_TEMPLATE_COLORS": "1" if settings.get(
-                            "template_colors_enabled", DEFAULT_SETTINGS["template_colors_enabled"]
-                        ) else "0",
-                        "FINALLY_TEMPLATE_FX": "1" if settings.get(
-                            "template_fx_enabled", DEFAULT_SETTINGS["template_fx_enabled"]
-                        ) else "0",
-                        "FINALLY_GAME_NAME": str(payload.get("game_name") or ""),
-                        "FINALLY_TIER": (
-                            str(payload.get("tier"))
-                            if payload.get("tier") in ("uncommon", "rare", "ultra_rare")
-                            else ""
-                        ),
-                        "FINALLY_ICON_PATH": str(payload.get("icon_path") or ""),
-                        "FINALLY_PLACEHOLDER_STYLE": str(
-                            settings.get("placeholder_icon", DEFAULT_SETTINGS["placeholder_icon"])
-                        ),
-                        "FINALLY_GAME_ART_GRADIENT_ENABLED": "1" if settings.get(
-                            "game_art_gradient_enabled", DEFAULT_SETTINGS["game_art_gradient_enabled"]
-                        ) else "0",
-                        "FINALLY_GAME_ART_PATH": str(payload.get("game_art_path") or ""),
-                        "FINALLY_PLACEHOLDER_ICON_PATH": str(payload.get("placeholder_icon_path") or ""),
-                        "FINALLY_PERCENT": (
-                            f"{payload['percent']:.2f}" if isinstance(payload.get("percent"), (int, float)) else ""
-                        ),
-                        "FINALLY_PERCENT_POSITION": str(
-                            settings.get("percent_position", DEFAULT_SETTINGS["percent_position"])
-                        ),
-                        "FINALLY_PERCENT_SIZE": str(
-                            settings.get("percent_size", DEFAULT_SETTINGS["percent_size"])
-                        ),
-                        "FINALLY_PERCENT_ENABLED": "1" if settings.get(
-                            "show_percent", DEFAULT_SETTINGS["show_percent"]
-                        ) else "0",
-                        "FINALLY_SIZE_PERCENT": str(settings.get("overlay_size_percent", 50)),
-                        "FINALLY_POSITION": str(settings.get("overlay_position", DEFAULT_SETTINGS["overlay_position"])),
-                        "FINALLY_TEMPLATE": str(
-                            payload.get("template_override")
-                            or settings.get("overlay_template", DEFAULT_SETTINGS["overlay_template"])
-                        ),
-                        "FINALLY_LABEL_SIZE": str(settings.get("label_font_size", DEFAULT_SETTINGS["label_font_size"])),
-                        "FINALLY_TITLE_SIZE": str(settings.get("title_font_size", DEFAULT_SETTINGS["title_font_size"])),
-                        "FINALLY_SUBTITLE_SIZE": str(settings.get("subtitle_font_size", DEFAULT_SETTINGS["subtitle_font_size"])),
-                        "FINALLY_NORMAL_GRADIENT_START": str(settings.get("normal_gradient_start")),
-                        "FINALLY_NORMAL_GRADIENT_END": str(settings.get("normal_gradient_end")),
-                        "FINALLY_RARE_GRADIENT_START": str(settings.get("rare_gradient_start")),
-                        "FINALLY_RARE_GRADIENT_END": str(settings.get("rare_gradient_end")),
-                        "FINALLY_NORMAL_CIRCLE_COLOR": str(settings.get("normal_circle_color")),
-                        "FINALLY_RARE_CIRCLE_COLOR": str(settings.get("rare_circle_color")),
-                        "FINALLY_SECONDS": str(
-                            max(
-                                float(settings.get("duration_seconds", DEFAULT_SETTINGS["duration_seconds"])),
-                                float(payload.get("min_seconds") or 0.0),
-                            )
-                        ),
-                        "FINALLY_GLOW_ENABLED": "1" if settings.get(
-                            "icon_glow_enabled", DEFAULT_SETTINGS["icon_glow_enabled"]
-                        ) else "0",
-                        "FINALLY_RING_SIZE": str(
-                            settings.get("ring_size", DEFAULT_SETTINGS["ring_size"])
-                        ),
-                        "FINALLY_GLOW_INTENSITY": str(
-                            settings.get("icon_glow_intensity", DEFAULT_SETTINGS["icon_glow_intensity"])
-                        ),
-                        "FINALLY_GRADIENT_DIRECTION": str(
-                            settings.get("gradient_direction", DEFAULT_SETTINGS["gradient_direction"])
-                        ),
-                        "FINALLY_GLOW_NORMAL": "1" if settings.get(
-                            "glow_normal_enabled", DEFAULT_SETTINGS["glow_normal_enabled"]
-                        ) else "0",
-                        "FINALLY_FRAME_RING_ENABLED": "1" if settings.get(
-                            "icon_frame_ring_enabled", DEFAULT_SETTINGS["icon_frame_ring_enabled"]
-                        ) else "0",
-                        "FINALLY_ICON_GRADIENT_ENABLED": "1" if settings.get(
-                            "icon_gradient_enabled", DEFAULT_SETTINGS["icon_gradient_enabled"]
-                        ) else "0",
-                    }
-                )
+                env.update(self._overlay_env_vars(settings, payload))
                 self._gamescope_overlay_status = "starting"
                 try:
                     await slot_task
                     # Try the detected display first; if the helper couldn't reach
                     # it, try the next candidate (at most three). The one that
                     # works is remembered for next time.
+                    if payload.get("screenshot_with_popup"):
+                        popup_seconds = float(env.get("FINALLY_SECONDS") or DEFAULT_SETTINGS["duration_seconds"])
+                        self._start_background(
+                            self._screenshot_for_unlock(payload, 0.6 + popup_seconds * 0.45, True)
+                        )
                     for display, authority in self._overlay_attempts():
                         env["DISPLAY"] = display
                         if authority:
@@ -3716,6 +3967,12 @@ class Plugin:
             "game_art_path": game_art_path,
             "settings_appid": settings_appid,
         }
+
+        if not test and early_settings.get("screenshot_on_unlock"):
+            if early_settings.get("screenshot_include_popup"):
+                payload["screenshot_with_popup"] = True        # taken once the popup is on screen
+            else:
+                self._start_background(self._screenshot_for_unlock(payload, 0.0, False))
 
         if not test:
             try:

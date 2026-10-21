@@ -29,7 +29,7 @@ def _early_display_check(display=None, cdll=None):
     return None
 
 
-if __name__ == "__main__" and "--selftest" not in sys.argv:
+if __name__ == "__main__" and "--selftest" not in sys.argv and not os.environ.get("FINALLY_PREVIEW_PATH"):
     _early_error = _early_display_check()
     if _early_error:
         sys.stderr.write(_early_error + "\n")
@@ -1539,6 +1539,10 @@ def _load_icon_surface(icon_path, size):
     return surface
 
 
+# The panel preview is an animation of the whole popup, drawn at this scale, in at most this many frames.
+PREVIEW_SCALE = 0.5
+PREVIEW_MAX_FRAMES = 60
+
 CARD_W = 680
 CARD_H = 152
 # Symmetric padding around the card for shadow/glow bleed only. Unlike the
@@ -1748,6 +1752,23 @@ TEMPLATES = {
         badge_shape="rounded_square",
         force_position="bottom_center",
     ),
+    "ps3_trophy": dict(
+        label="PS3 Trophy",
+        corner_radius=22,
+        # "glass" is what the achievement tracker draws its card with; the
+        # popup itself uses its own layout (see _make_surface_ps3).
+        background="glass",
+        accent="none",
+        icon_shape="rounded_square",
+        icon_side="left",
+        label_style="tight_caps",
+        font_family="DejaVu Sans",
+        border=("hairline", 1),
+        compact=False,
+        layout="ps3",
+        # The PS3 shows its trophy popups in the top right corner.
+        force_position="top_right",
+    ),
     "mythic_completion": dict(
         label="Pinnacle Completion",
         corner_radius=0,
@@ -1882,6 +1903,7 @@ TEMPLATE_PRESET_COLORS = {
     "xbox_360_v2": ("#3A3D3A", "#1E201E", "#8CC63F"),
     "xbox_360_v2_square": ("#3A3D3A", "#1E201E", "#8CC63F"),
     "playstation_trophy": ("#0A3A82", "#041C45", "#0070D1"),
+    "ps3_trophy": ("#3A3F48", "#14161A", "#9CC4F2"),
     "switch_bold": ("#2B2F3A", "#191C24", "#FF3C4E"),
     "steam_flat": ("#2A475E", "#1B2838", "#66C0F4"),
     "material_minimal": ("#2B2930", "#1D1B20", "#D0BCFF"),
@@ -2953,6 +2975,203 @@ def _tracker_motion(position, vis, overlay_scale):
     return eased, (-slide if h_side == "left" else slide), 0.0
 
 
+# Where the popup sits on screen, set from the chosen position in main(). Templates
+# that draw a card smaller than the full canvas use these to hug the same edge.
+CARD_H_ALIGN = "center"
+CARD_V_ALIGN = "bottom"
+
+# Trophy cup colours by grade: (light, dark).
+PS3_GRADES = {
+    "bronze": ((0.86, 0.56, 0.30), (0.52, 0.29, 0.12)),
+    "silver": ((0.92, 0.94, 0.97), (0.55, 0.58, 0.64)),
+    "gold": ((1.00, 0.88, 0.45), (0.80, 0.53, 0.10)),
+    "platinum": ((0.88, 0.97, 1.00), (0.42, 0.62, 0.84)),
+}
+
+
+def _ps3_grade(is_rare, tier):
+    """Common is bronze, uncommon silver, rare gold, ultra rare platinum."""
+    if tier == "ultra_rare":
+        return "platinum"
+    if tier == "rare" or (is_rare and tier not in ("uncommon",)):
+        return "gold"
+    if tier == "uncommon":
+        return "silver"
+    return "bronze"
+
+
+def _draw_grade_cup(ctx, cx, cy, size, grade, alpha):
+    """A small trophy cup in the grade's colour (bronze/silver/gold/platinum)."""
+    light, dark = PS3_GRADES[grade]
+    fill = cairo.LinearGradient(cx, cy - size * 0.5, cx, cy + size * 0.5)
+    fill.add_color_stop_rgba(0, light[0], light[1], light[2], alpha)
+    fill.add_color_stop_rgba(1, dark[0], dark[1], dark[2], alpha)
+    # Handles
+    ctx.set_line_width(max(1.5, size * 0.07))
+    ctx.set_source(fill)
+    for side in (-1, 1):
+        ctx.new_sub_path()
+        ctx.arc(cx + side * size * 0.30, cy - size * 0.17, size * 0.13, 0, math.tau)
+        ctx.stroke()
+    # Bowl
+    ctx.new_path()
+    ctx.move_to(cx - size * 0.26, cy - size * 0.40)
+    ctx.line_to(cx + size * 0.26, cy - size * 0.40)
+    ctx.curve_to(cx + size * 0.26, cy - size * 0.04, cx + size * 0.14, cy + size * 0.12, cx, cy + size * 0.12)
+    ctx.curve_to(cx - size * 0.14, cy + size * 0.12, cx - size * 0.26, cy - size * 0.04, cx - size * 0.26, cy - size * 0.40)
+    ctx.close_path()
+    ctx.set_source(fill)
+    ctx.fill()
+    # Stem and base
+    ctx.rectangle(cx - size * 0.04, cy + size * 0.10, size * 0.08, size * 0.18)
+    ctx.set_source(fill)
+    ctx.fill()
+    ctx.rectangle(cx - size * 0.18, cy + size * 0.28, size * 0.36, size * 0.10)
+    ctx.set_source(fill)
+    ctx.fill()
+    # Highlight on the bowl
+    ctx.new_path()
+    ctx.move_to(cx - size * 0.17, cy - size * 0.34)
+    ctx.line_to(cx - size * 0.10, cy - size * 0.34)
+    ctx.curve_to(cx - size * 0.10, cy - size * 0.12, cx - size * 0.07, cy - size * 0.02, cx - size * 0.03, cy + size * 0.03)
+    ctx.curve_to(cx - size * 0.14, cy - size * 0.05, cx - size * 0.17, cy - size * 0.18, cx - size * 0.17, cy - size * 0.34)
+    ctx.close_path()
+    ctx.set_source_rgba(1, 1, 1, 0.45 * alpha)
+    ctx.fill()
+
+
+def _make_surface_ps3(
+    width, height, scale, title, subtitle, is_rare, progress, icon_path,
+    gradient_start, gradient_end, circle_color, template, total_seconds,
+    label_font_size, title_font_size, subtitle_font_size,
+    gradient_direction="vertical", icon_gradient_active=False, percent=None,
+):
+    """PlayStation 3 trophy notification: a dark, glossy, rounded bar with the
+    trophy's picture on the left, its name and description beside it, and a
+    small cup in the trophy's grade colour on the right. Drawn with paths
+    only (no PlayStation artwork)."""
+    global ACTIVE_FX
+    ACTIVE_FX = ()
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+    ctx = cairo.Context(surface)
+    ctx.set_operator(cairo.OPERATOR_CLEAR)
+    ctx.paint()
+    ctx.set_operator(cairo.OPERATOR_OVER)
+    ctx.scale(scale, scale)
+
+    anim = _animation_state(progress)
+    alpha = anim.container_alpha
+    accent = circle_color
+
+    card_w, card_h = 560.0, 112.0
+    radius = 24.0
+    if CARD_H_ALIGN == "left":
+        x = float(PAD_X)
+    elif CARD_H_ALIGN == "right":
+        x = float(PAD_X + CARD_W) - card_w
+    else:
+        x = PAD_X + (CARD_W - card_w) / 2.0
+    if CARD_V_ALIGN == "top":
+        y = float(PAD_Y)
+    else:
+        y = float(PAD_Y + CARD_H) - card_h
+
+    def tint(weight):
+        if PRESET_ACTIVE:
+            return max(weight, 0.90)
+        return max(weight, 0.60) if icon_gradient_active else weight
+
+    # Drop shadow
+    _rounded_rect(ctx, x + 2, y + 8, card_w, card_h, radius)
+    ctx.set_source_rgba(0, 0, 0, 0.45 * alpha)
+    ctx.fill()
+
+    # Body: smoked grey glass, lighter at the top
+    top = _blend((0.25, 0.27, 0.31), gradient_start[:3], tint(0.10))
+    bottom = _blend((0.09, 0.10, 0.12), gradient_end[:3], tint(0.10))
+    _set_gradient_source(ctx, x, y, card_w, card_h, gradient_direction, top, bottom, 0.94 * alpha, 0.96 * alpha)
+    _rounded_rect(ctx, x, y, card_w, card_h, radius)
+    ctx.fill()
+
+    ctx.save()
+    _rounded_rect(ctx, x, y, card_w, card_h, radius)
+    ctx.clip()
+    # Glossy upper half with a soft lower edge
+    gloss = cairo.LinearGradient(x, y, x, y + card_h * 0.52)
+    gloss.add_color_stop_rgba(0, 1, 1, 1, 0.20 * alpha)
+    gloss.add_color_stop_rgba(1, 1, 1, 1, 0.03 * alpha)
+    ctx.set_source(gloss)
+    ctx.rectangle(x, y, card_w, card_h * 0.52)
+    ctx.fill()
+    # Cool light from the left, like the XMB glow behind the bar
+    glow = cairo.LinearGradient(x, y, x + card_w * 0.7, y)
+    glow.add_color_stop_rgba(0, accent[0], accent[1], accent[2], 0.10 * alpha)
+    glow.add_color_stop_rgba(1, accent[0], accent[1], accent[2], 0.0)
+    ctx.set_source(glow)
+    ctx.rectangle(x, y, card_w, card_h)
+    ctx.fill()
+    ctx.restore()
+
+    # Border
+    _rounded_rect(ctx, x + 0.75, y + 0.75, card_w - 1.5, card_h - 1.5, radius)
+    ctx.set_line_width(1.5)
+    ctx.set_source_rgba(0.82, 0.88, 0.98, 0.38 * alpha)
+    ctx.stroke()
+    if (icon_gradient_active or PRESET_ACTIVE) and is_rare:
+        _rounded_rect(ctx, x + 2, y + 2, card_w - 4, card_h - 4, radius - 2)
+        ctx.set_line_width(2.0)
+        ctx.set_source_rgba(RARE_EDGE_GOLD[0], RARE_EDGE_GOLD[1], RARE_EDGE_GOLD[2], 0.85 * alpha)
+        ctx.stroke()
+
+    # Trophy picture
+    icon_size = 80.0
+    icon_x = x + 18
+    icon_y = y + (card_h - icon_size) / 2.0
+    icon_cx, icon_cy = icon_x + icon_size / 2.0, icon_y + icon_size / 2.0
+    icon_alpha = anim.icon_alpha
+    if icon_alpha > 0:
+        _rounded_rect(ctx, icon_x - 2, icon_y - 2, icon_size + 4, icon_size + 4, 12)
+        ctx.set_source_rgba(0.80, 0.86, 0.96, 0.55 * icon_alpha)
+        ctx.fill()
+        _rounded_rect(ctx, icon_x, icon_y, icon_size, icon_size, 10)
+        ctx.set_source_rgba(0.06, 0.07, 0.09, icon_alpha)
+        ctx.fill()
+        _draw_icon(
+            ctx, icon_path, icon_cx, icon_cy, icon_size / 2.0, icon_alpha, accent,
+            scale=anim.icon_scale, rotation=0.0, shape="rounded_square",
+        )
+
+    # Grade cup on the right
+    cup_size = 54.0
+    cup_cx = x + card_w - 24 - cup_size / 2.0
+    grade = _ps3_grade(is_rare, TIER or None)
+    if anim.pill_alpha > 0:
+        _draw_grade_cup(ctx, cup_cx, y + card_h / 2.0, cup_size, grade, anim.pill_alpha)
+
+    # Text
+    tx = icon_x + icon_size + 20
+    text_w = cup_cx - cup_size / 2.0 - 18 - tx
+    t_size = min(title_font_size, 25)
+    s_size = min(subtitle_font_size, 17)
+    block_h = t_size * 1.3 + 4 + s_size * 1.3
+    ty = y + (card_h - block_h) / 2.0
+    if anim.title_alpha > 0:
+        _text(ctx, title or tr("Achievement Unlocked"), tx, ty + anim.title_y, t_size,
+              (1, 1, 1, anim.title_alpha), Pango.Weight.BOLD, text_w, template["font_family"])
+    if subtitle and anim.subtitle_alpha > 0:
+        sub_w = text_w
+        if percent is not None:
+            sub_w = max(text_w - _percent_pill_width(ctx, percent, template["font_family"]) - 12, 60)
+        _text(ctx, subtitle, tx, ty + t_size * 1.3 + 4 + anim.subtitle_y, s_size,
+              (0.78, 0.82, 0.88, 0.92 * anim.subtitle_alpha), Pango.Weight.NORMAL, sub_w, template["font_family"])
+    if percent is not None:
+        percent_alpha = anim.subtitle_alpha if subtitle else anim.title_alpha
+        _draw_percent_pill(ctx, tx + text_w, y + card_h - 12, True, percent, percent_alpha, False, template["font_family"])
+
+    surface.flush()
+    return surface
+
+
 def _make_surface(
     width, height, scale, title, subtitle, is_rare, progress, icon_path,
     gradient_start, gradient_end, circle_color, template=None, total_seconds=5.8,
@@ -2963,6 +3182,13 @@ def _make_surface(
 ):
     global ACTIVE_FX
     template = template or TEMPLATES[DEFAULT_TEMPLATE]
+    if template.get("layout") == "ps3":
+        return _make_surface_ps3(
+            width, height, scale, title, subtitle, is_rare, progress, icon_path,
+            gradient_start, gradient_end, circle_color, template, total_seconds,
+            label_font_size, title_font_size, subtitle_font_size,
+            gradient_direction, icon_gradient_active, percent,
+        )
     if template.get("layout") == "door_wipe":
         return _make_surface_door_wipe(
             width, height, scale, title, subtitle, is_rare, progress, icon_path,
@@ -3407,12 +3633,14 @@ def main():
         PLACEHOLDER_STYLE = "auto"
     PLACEHOLDER_ICON_PATH = os.environ.get("FINALLY_PLACEHOLDER_ICON_PATH", "")
     size_percent = _clamp(float(os.environ.get("FINALLY_SIZE_PERCENT", "50")), 0.0, 100.0)
-    if size_percent <= 0:
+    if size_percent <= 0 and not os.environ.get("FINALLY_PREVIEW_PATH"):
         return
     position = _resolve_position(os.environ.get("FINALLY_POSITION", DEFAULT_POSITION))
     template = _resolve_template(os.environ.get("FINALLY_TEMPLATE", DEFAULT_TEMPLATE))
     if template.get("force_position"):
         position = _resolve_position(template["force_position"])
+    global CARD_H_ALIGN, CARD_V_ALIGN
+    CARD_H_ALIGN, CARD_V_ALIGN = position["h"], position["v"]
 
     def _env_font_size(name, default, lo, hi):
         try:
@@ -3492,6 +3720,50 @@ def main():
         f"({'fixed by the Popup screen size setting' if os.environ.get('FINALLY_WIDTH') else 'auto-detected from the X display'})",
         file=sys.stderr,
     )
+
+    preview_path = os.environ.get("FINALLY_PREVIEW_PATH", "")
+    if preview_path:
+        # Panel preview: the whole popup (entrance, hold, exit) drawn frame by frame into one animated PNG.
+        # No window and no display needed. The slide in from the screen edge is not part of it.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import finally_apng
+
+        preview_scale = PREVIEW_SCALE
+        count = int(_clamp(seconds * 10, 24, PREVIEW_MAX_FRAMES))
+        delay_ms = int(seconds * 1000 / count)
+        frames = []
+        frame_file = preview_path + ".frame"
+        for index in range(count):
+            surface = _make_surface(
+                int(CANVAS_W * preview_scale), int(CANVAS_H * preview_scale), preview_scale,
+                title, subtitle, is_rare, index / (count - 1), icon_path,
+                gradient_start, gradient_end, circle_color,
+                template=template,
+                total_seconds=seconds,
+                label_font_size=label_font_size,
+                title_font_size=title_font_size,
+                subtitle_font_size=subtitle_font_size,
+                glow_enabled=glow_enabled,
+                glow_intensity=glow_intensity,
+                gradient_direction=gradient_direction,
+                glow_normal_enabled=glow_normal_enabled,
+                frame_ring_enabled=frame_ring_enabled,
+                icon_gradient_active=icon_gradient_active,
+                percent=percent,
+            )
+            surface.flush()
+            surface.write_to_png(frame_file)
+            with open(frame_file, "rb") as stream:
+                frames.append(stream.read())
+        try:
+            os.unlink(frame_file)
+        except OSError:
+            pass
+        delays = [delay_ms] * count
+        delays[-1] += 900                  # a short pause before it plays again
+        with open(preview_path, "wb") as stream:
+            stream.write(finally_apng.frames_to_apng(frames, delays))
+        return
 
     _glfw_prefer_x11()
     if not glfw.glfwInit():

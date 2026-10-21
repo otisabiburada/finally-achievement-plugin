@@ -63,6 +63,10 @@ import {
   type PlaceholderIcon,
   type CompletionTitle,
   type FinallySettings,
+  PREVIEW_TIER_OPTIONS,
+  type PreviewTier,
+  type ScreenshotResponse,
+  type TemplatePreviewResponse,
 } from "./finallyThemes";
 import {
   type Achievement,
@@ -699,6 +703,10 @@ function StatusPanel() {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [profileOverride, setProfileOverride] = useState<GameProfileInfo | null>(null);
   const [view, setView] = useState<PanelView>("popup");
+  const [previewTier, setPreviewTier] = useState<PreviewTier>("common");
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [shotMessage, setShotMessage] = useState<string | null>(null);
   const [steamLang, setSteamLang] = useState<LangCode | null>(null);
   const [langInfo, setLangInfo] = useState<LanguageInfo | null>(null);
   const [overlayCheck, setOverlayCheck] = useState<OverlayCheckResult | null>(null);
@@ -970,6 +978,54 @@ function StatusPanel() {
     label: sound.source === "user" ? `${sound.name} ${t("(yours)")}` : sound.name,
   }));
 
+  // Live preview of the chosen template, drawn by the same renderer as the real popup. Redrawn (after a short
+  // pause, so dragging a slider doesn't start a drawing per step) whenever a setting or the preview kind changes.
+  const previewKey = JSON.stringify(settings);
+  useEffect(() => {
+    if (view !== "popup") return;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await call<[string, string], TemplatePreviewResponse>(
+          "get_template_preview",
+          settings.overlay_template,
+          previewTier,
+        );
+        if (cancelled) return;
+        if (result.ok && result.image) {
+          setPreviewImage(result.image);
+          setPreviewError(null);
+        } else {
+          setPreviewError(result.error ?? "");
+        }
+      } catch (error) {
+        if (!cancelled) setPreviewError(toErrorMessage(error));
+      }
+    }, 450);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewKey, previewTier, view]);
+
+  const testScreenshot = useCallback(async () => {
+    setPendingAction("screenshot");
+    setShotMessage(null);
+    try {
+      const result = await call<[], ScreenshotResponse>("test_screenshot");
+      setShotMessage(
+        result.ok
+          ? t("Saved to {path}", { path: result.path ?? "" })
+          : t("Screenshot failed: {error}", { error: result.error ?? "" }),
+      );
+    } catch (error) {
+      setShotMessage(t("Screenshot failed: {error}", { error: toErrorMessage(error) }));
+    } finally {
+      setPendingAction(null);
+    }
+  }, []);
+
   const trigger = useCallback(
     async (
       method:
@@ -1095,6 +1151,28 @@ function StatusPanel() {
               void updateSettings({ overlay_template: selection.data })
             }
           />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label={t("Preview as")}
+            description={t("Shows the selected template below as a looping animation of the whole popup, drawn the same way as the real popup. The Test buttons further down still play it on screen.")}
+            rgOptions={tOpts(PREVIEW_TIER_OPTIONS)}
+            selectedOption={previewTier}
+            onChange={(selection: { data: PreviewTier }) => setPreviewTier(selection.data)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          {previewImage ? (
+            <img
+              src={previewImage}
+              alt={t("Popup template preview")}
+              style={{ width: "100%", height: "auto", display: "block" }}
+            />
+          ) : (
+            <div style={{ fontSize: 12, opacity: 0.7 }}>
+              {previewError ? t("Preview unavailable: {error}", { error: previewError }) : t("Drawing preview...")}
+            </div>
+          )}
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
@@ -1563,6 +1641,38 @@ function StatusPanel() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+      <PanelSection title={t("Screenshot")}>
+        <PanelSectionRow>
+          <ToggleField
+            label={t("Screenshot on unlock")}
+            description={t("Saves a picture of the game each time you unlock an achievement, to Pictures/Finally Achievements/Screenshots.")}
+            checked={settings.screenshot_on_unlock}
+            disabled={pendingAction !== null}
+            onChange={(value) => void updateSettings({ screenshot_on_unlock: value })}
+          />
+        </PanelSectionRow>
+        {settings.screenshot_on_unlock && (
+          <PanelSectionRow>
+            <ToggleField
+              label={t("Include the popup")}
+              description={t("Takes the picture a moment later, when the popup is on screen, so it shows in the picture. Off: the game only, at the moment of the unlock.")}
+              checked={settings.screenshot_include_popup}
+              disabled={pendingAction !== null}
+              onChange={(value) => void updateSettings({ screenshot_include_popup: value })}
+            />
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={pendingAction !== null}
+            onClick={() => void testScreenshot()}
+            description={shotMessage ?? t("Takes one screenshot now, to check that saving works.")}
+          >
+            {t("Test screenshot")}
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
       <PanelSection title={t("Popup Tests")}>
         <PanelSectionRow>
           <ToggleField
@@ -1875,7 +1985,16 @@ export default definePlugin(() => {
     name: "Finally Achievement Plugin",
     icon: <FaSteam />,
     alwaysRender: true,
-    titleView: <div className={staticClasses.Title}>Finally Achievement Plugin</div>,
+    // One short line: the full plugin name wrapped onto three lines and the taller header covered the "Show" row.
+    titleView: (
+      <div
+        className={staticClasses.Title}
+        title="Finally Achievement Plugin"
+        style={{ flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+      >
+        Finally Achievements
+      </div>
+    ),
     content: <StatusPanel />,
   };
 });

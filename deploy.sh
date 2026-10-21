@@ -28,6 +28,8 @@ sshpass -p "${DECK_PASS}" rsync -s -az --delete -e "${RSYNC_SSH}" "${SCRIPT_DIR}
 sshpass -p "${DECK_PASS}" rsync -s -az -e "${RSYNC_SSH}" \
   "${SCRIPT_DIR}/main.py" \
   "${SCRIPT_DIR}/finally_gamescope_overlay.py" \
+  "${SCRIPT_DIR}/finally_screenshot.py" \
+  "${SCRIPT_DIR}/finally_apng.py" \
   "${SCRIPT_DIR}/steamworks_probe.py" \
   "${SCRIPT_DIR}/steamworks_list_probe.py" \
   "${SCRIPT_DIR}/steamworks_track_probe.py" \
