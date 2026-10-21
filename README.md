@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/otisabiburada/finally-achievement-plugin/raw/main/docs/demo.mp4" controls muted loop playsinline width="80%"></video>
+  <video src="https://github.com/otisabiburada/finally-achievement-plugin/blob/main/docs/IMG_8089.gif" controls muted loop playsinline width="80%"></video>
   <br>
   <sub>If the video does not play here, <a href="docs/demo.mp4">open the demo clip</a>.</sub>
 </p>
