@@ -17,9 +17,7 @@
 </p>
 
 <p align="center">
-  <video src="https://github.com/otisabiburada/finally-achievement-plugin/blob/main/docs/IMG_8089.gif" controls muted loop playsinline width="80%"></video>
-  <br>
-  <sub>If the video does not play here, <a href="docs/demo.mp4">open the demo clip</a>.</sub>
+  <img src="docs/images/demo-popup.gif" alt="An achievement popup appearing over a game on a Steam Deck" width="80%">
 </p>
 
 ---
@@ -41,15 +39,21 @@ Steam on the Deck unlocks achievements quietly. **Finally Achievement Plugin** f
 | **Fast and local** | Unlocks are read from Steam's own files within about a second. No account or API key needed (a Steam Web API key is an optional fallback). |
 | **9 languages** | English, Turkish, German, French, Spanish, Brazilian Portuguese, Russian, Polish and Simplified Chinese, following your Steam language. |
 
+## See it in action
+
+Real footage from a Steam Deck.
+
 <p align="center">
-  <img src="docs/images/popups.png" alt="Popup templates and rarity tiers" width="90%">
+  <img src="docs/images/demo-popup-2.gif" alt="A popup unlocking in a pixel-art game on a Steam Deck" width="80%">
 </p>
 
 <p align="center">
-  <img src="docs/images/browser.png" alt="Achievement browser and tracker" width="90%">
+  <img src="docs/images/popups.png" alt="Popup templates and rarity tiers (mockup)" width="80%">
+  <br>
+  <img src="docs/images/browser.png" alt="Achievement browser and tracker (mockup)" width="80%">
+  <br>
+  <sub>The two pictures above are illustrative mockups of the templates and the browser.</sub>
 </p>
-
-> The two images above are illustrative mockups. The video at the top is a real clip.
 
 ## Quick start
 
