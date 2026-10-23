@@ -33,6 +33,7 @@ sshpass -p "${DECK_PASS}" rsync -s -az -e "${RSYNC_SSH}" \
   "${SCRIPT_DIR}/steamworks_probe.py" \
   "${SCRIPT_DIR}/steamworks_list_probe.py" \
   "${SCRIPT_DIR}/steamworks_track_probe.py" \
+  "${SCRIPT_DIR}/finally_steamworks_lib.py" \
   "${SCRIPT_DIR}/tracker_overlay.py" \
   "${SCRIPT_DIR}/finally_diagnose.py" \
   "${SCRIPT_DIR}/finally_cairo_ctypes.py" \

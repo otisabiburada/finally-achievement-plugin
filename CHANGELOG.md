@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.7.1
+- Fixed: the achievement browser and tracker said "Steam's achievement library wasn't found on this system". The plugin only looked for `libsteam_api.so` in one Steam folder, for the user `deck`. It now searches every Steam install (any user name, Flatpak Steam) and the native Linux games you have installed (almost all of them ship it), skips 32-bit and unusable copies, and remembers what it found (`steamworks_lib.json` in the settings folder). It also works with older copies of the library (ISteamUserStats v010–v013, with or without `SteamAPI_InitFlat`). To use a particular copy, put it in the plugin's settings folder or set `FINALLY_STEAMWORKS_LIB`.
+- If no usable library is found, or Steamworks can't start, the browser lists every achievement from Steam's own local files (names, descriptions, secret ones kept secret, what's unlocked and when, global %), and the tracker still shows when the pinned achievement unlocks.
+- Steam's folders (log, stats, library cache, game art) are found from the Decky user's home instead of being fixed to `/home/deck`, so the instant detection paths also run on other systems (e.g. a Legion Go on Bazzite). The stats-file watcher covers every Steam install found.
+- Faster unlock detection: Steamworks is checked every 50 ms (slower automatically for games with hundreds of achievements) and asked to resend stats every 0.5 s instead of 2 s; Steam's stats log every 0.1 s instead of 0.35 s; the stats-file backstop every 0.1 s; a newly started game is noticed within 0.5 s. A popup waits at most 0.6 s for its icon and extras instead of 1 s. A pinned achievement is shown as unlocked right away, and the tracker refreshes every 2 s instead of 4 s.
+- New `finally_steamworks_lib.py` (shared by the helpers) and `tests/test_steamworks_lib.py`.
+
 ## 1.7.0
 - The panel shows a preview of the selected popup template under the template picker, an animated loop of the whole popup, drawn by the popup renderer itself (the slide in from the screen edge is not part of it). *Preview as* picks common, uncommon, rare or ultra rare. The Test buttons stay.
 - New template: PS3 Trophy (top right, glossy dark bar, trophy picture, grade-coloured cup).

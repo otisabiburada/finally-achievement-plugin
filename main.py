@@ -19,6 +19,41 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import decky
 
 
+def _detect_user_home() -> str:
+    """The Steam user's home folder. Was always /home/deck; other handhelds
+    and distros (Legion Go / ROG Ally on Bazzite, ChimeraOS, desktop Linux)
+    use other user names."""
+    for candidate in (getattr(decky, "DECKY_USER_HOME", ""), os.environ.get("DECKY_USER_HOME", "")):
+        if candidate and os.path.isdir(str(candidate)):
+            return str(candidate)
+    if os.path.isdir("/home/deck/.local/share/Steam") or os.path.isdir("/home/deck/.steam"):
+        return "/home/deck"
+    for home in sorted(glob.glob("/home/*/")):
+        if os.path.isdir(os.path.join(home, ".local/share/Steam")) or os.path.isdir(os.path.join(home, ".steam/steam")):
+            return home.rstrip("/")
+    return os.path.expanduser("~") if os.path.expanduser("~") not in ("", "/root") else "/home/deck"
+
+
+def _detect_steam_root(home: str) -> str:
+    """The Steam install that holds this user's data (userdata, appcache, logs)."""
+    candidates = (
+        os.path.join(home, ".local/share/Steam"),
+        os.path.join(home, ".steam/steam"),
+        os.path.join(home, ".steam/root"),
+        os.path.join(home, ".var/app/com.valvesoftware.Steam/.local/share/Steam"),
+        "/home/deck/.local/share/Steam",
+    )
+    for marker in ("userdata", "appcache", ""):
+        for candidate in candidates:
+            if os.path.isdir(os.path.join(candidate, marker)):
+                return os.path.realpath(candidate)
+    return candidates[0]
+
+
+USER_HOME = _detect_user_home()
+STEAM_ROOT = _detect_steam_root(USER_HOME)
+
+
 def _load_i18n():
     """finally_i18n.py from the plugin folder, or None (the plugin then stays in English)."""
     try:
@@ -38,13 +73,14 @@ def _load_i18n():
 
 _I18N = None
 
-STEAM_LOG_PATH = "/home/deck/.local/share/Steam/logs/stats_log.txt"
+STEAM_LOG_PATH = os.path.join(STEAM_ROOT, "logs", "stats_log.txt")
 STEAM_LOG_DIR = os.path.dirname(STEAM_LOG_PATH)
-STEAM_USERDATA_GLOB = "/home/deck/.local/share/Steam/userdata/*"
-LIBRARYCACHE_GLOB = "/home/deck/.local/share/Steam/userdata/*/config/librarycache/*.json"
-LIBRARYCACHE_DIR_GLOB = "/home/deck/.local/share/Steam/userdata/*/config/librarycache"
-STEAM_APPCACHE_STATS_DIR = "/home/deck/.local/share/Steam/appcache/stats"
-STEAMWORKS_LIB_PATH = "/home/deck/.local/share/Steam/steamrt64/libsteam_api.so"
+STEAM_USERDATA_GLOB = os.path.join(STEAM_ROOT, "userdata", "*")
+LIBRARYCACHE_GLOB = os.path.join(STEAM_ROOT, "userdata", "*", "config", "librarycache", "*.json")
+LIBRARYCACHE_DIR_GLOB = os.path.join(STEAM_ROOT, "userdata", "*", "config", "librarycache")
+STEAM_APPCACHE_STATS_DIR = os.path.join(STEAM_ROOT, "appcache", "stats")
+STEAMWORKS_LIB_PATH = os.path.join(STEAM_ROOT, "steamrt64", "libsteam_api.so")
+STEAMWORKS_LIB_MODULE_NAME = "finally_steamworks_lib.py"
 STEAMWORKS_HELPER_NAME = "steamworks_probe.py"
 FINALLY_OVERLAY_HELPER_NAME = "finally_gamescope_overlay.py"
 STEAMWORKS_PYTHON = "/usr/bin/python3"
@@ -109,27 +145,27 @@ else:
     print(check(sys.argv[1]))
 """
 STALE_UNLOCK_GRACE_SECONDS = 15
-POLL_INTERVAL_SECONDS = 0.35
+POLL_INTERVAL_SECONDS = 0.1
 CACHE_SCAN_INTERVAL_SECONDS = 1.5
 RECONCILIATION_SCAN_INTERVAL_SECONDS = 120.0
 INOTIFY_DEBOUNCE_SECONDS = 0.10
-STEAMWORKS_APPID_SCAN_INTERVAL_SECONDS = 1.0
-STEAMWORKS_POLL_INTERVAL_MS = 100
+STEAMWORKS_APPID_SCAN_INTERVAL_SECONDS = 0.5
+STEAMWORKS_POLL_INTERVAL_MS = 50
 STEAMWORKS_RESTART_COOLDOWN_SECONDS = 15.0
 # How often the achievement helper asks Steam to resend the game's stats. Without
 # this, some setups (reported on a Steam Machine) only notice an unlock after a
 # long delay or after the Steam button is pressed.
-STEAMWORKS_REFRESH_INTERVAL_MS = 2000
+STEAMWORKS_REFRESH_INTERVAL_MS = 500
 DESCRIPTION_LOOKUP_SECONDS = 3.0
 # Steam writes appcache/stats/UserGameStats_<account>_<appid>.bin the moment a game stores an unlock, long before
 # the library page data (librarycache) is refreshed. This watcher reads that file directly.
 # The stats file is normally caught by inotify the moment Steam writes it; this scan is only the backstop (other
 # Steam roots, or inotify unavailable).
-STATS_BIN_SCAN_INTERVAL_SECONDS = 0.25
+STATS_BIN_SCAN_INTERVAL_SECONDS = 0.1
 STATS_BIN_NEW_WINDOW_SECONDS = 90          # a file seen for the first time: only unlocks this recent count as new
 # The longest a popup waits for its icon, percentage, description and game art after an unlock is noticed. Whatever
 # isn't ready by then is left out (the lookups finish in the background and are cached for the next popup).
-POPUP_PREP_BUDGET_SECONDS = 1.0
+POPUP_PREP_BUDGET_SECONDS = 0.6
 # When a game starts, this many of its still-locked achievement icons are downloaded ahead of time, so an unlock's
 # popup reads its icon from disk instead of waiting for the network.
 PREWARM_ICON_LIMIT = 400
@@ -140,12 +176,17 @@ SKIP_CACHE_FILES = {"achievement_progress.json"}
 AUDIO_PREROLL_SECONDS = 0.35
 STEAM_ID64_BASE = 76561197960265728
 STEAM_WEB_API_KEY_ENV = "STEAM_WEB_API_KEY"
-FINALLY_SETTINGS_DIR = "/home/deck/homebrew/settings/Finally Achievement Plugin"
+_DECKY_SETTINGS_ROOT = (
+    "/home/deck/homebrew/settings"
+    if os.path.isdir("/home/deck/homebrew") or not getattr(decky, "DECKY_HOME", "")
+    else os.path.join(str(decky.DECKY_HOME), "settings")
+)
+FINALLY_SETTINGS_DIR = os.path.join(_DECKY_SETTINGS_ROOT, "Finally Achievement Plugin")
 FINALLY_SETTINGS_FILE = os.path.join(FINALLY_SETTINGS_DIR, "settings.json")
 FINALLY_GAME_PROFILES_FILE = os.path.join(FINALLY_SETTINGS_DIR, "game_profiles.json")
 FINALLY_GAME_NAMES_FILE = os.path.join(FINALLY_SETTINGS_DIR, "game_names.json")
 # Achievement browser + tracker (merged in from the old standalone achievements plugin)
-OLD_TRACKER_SETTINGS_DIR = "/home/deck/homebrew/settings/Finally-Achievements-legacy"
+OLD_TRACKER_SETTINGS_DIR = os.path.join(_DECKY_SETTINGS_ROOT, "Finally-Achievements-legacy")
 STEAMWORKS_LIST_HELPER_NAME = "steamworks_list_probe.py"
 STEAMWORKS_TRACK_HELPER_NAME = "steamworks_track_probe.py"
 TRACKER_OVERLAY_SCRIPT_NAME = "tracker_overlay.py"
@@ -154,7 +195,7 @@ DIAGNOSE_SCRIPT_NAME = "finally_diagnose.py"
 DRAWING_LAYER_NAME = "finally_cairo_ctypes.py"
 TRACKER_POSITIONS = ("top_left", "top_right", "bottom_left", "bottom_right")
 TRACKER_SIZE_RANGE = (100, 50, 150)             # (default, lo, hi) percent
-TRACKER_ACTIVE_POLL_SECONDS = 4.0
+TRACKER_ACTIVE_POLL_SECONDS = 2.0
 TRACKER_IDLE_POLL_SECONDS = 8.0
 TRACKER_RESTART_COOLDOWN_SECONDS = 5.0
 TRACKER_HIDE_WAIT_SECONDS = 0.55                # tracker slide-out (0.35s) + margin, before a toast window opens
@@ -166,7 +207,7 @@ ICON_CHECK_TIMEOUT_SECONDS = 4.0
 # A display setup the popup couldn't open on is skipped for this long, so later
 # popups don't try it again first (each failed try costs a helper start).
 OVERLAY_FAILED_RETRY_SECONDS = 600.0
-OLD_SETTINGS_DIR = "/home/deck/homebrew/settings/Finally-legacy"
+OLD_SETTINGS_DIR = os.path.join(_DECKY_SETTINGS_ROOT, "Finally-legacy")
 STEAM_WEB_API_KEY_FILES = [
     os.path.join(FINALLY_SETTINGS_DIR, "steam_web_api_key"),
     os.path.join(OLD_SETTINGS_DIR, "steam_web_api_key"),
@@ -553,6 +594,9 @@ class Plugin:
         self._steam_api_task = asyncio.create_task(
             self._watch_steam_api(), name="finally-steam-api-watch"
         )
+        self._swlib_search_task = asyncio.create_task(
+            self._ensure_steamworks_lib(), name="finally-steamworks-lib-search"
+        )
         self._steamworks_task = asyncio.create_task(
             self._watch_steamworks(), name="finally-steamworks-watch"
         )
@@ -623,6 +667,8 @@ class Plugin:
             "steamworks_last_process_pid": self._steamworks_last_process_pid,
             "steamworks_unlock_count": self._steamworks_unlock_count,
             "steamworks_poll_interval_ms": STEAMWORKS_POLL_INTERVAL_MS,
+            "steamworks_lib_path": getattr(self, "_swlib_path", None),
+            "steam_root": STEAM_ROOT,
             "gamescope_overlay_status": self._gamescope_overlay_status,
             "gamescope_overlay_last_error": self._gamescope_overlay_last_error,
             "settings": self._effective_settings(),
@@ -744,8 +790,9 @@ class Plugin:
         return value.replace('\\"', '"').replace("\\\\", "\\")
 
     def _steam_roots(self) -> List[str]:
-        home = str(getattr(decky, "DECKY_USER_HOME", "") or "/home/deck")
+        home = USER_HOME
         candidates = [
+            STEAM_ROOT,
             os.path.join(home, ".local/share/Steam"),
             os.path.join(home, ".steam/steam"),
             os.path.join(home, ".steam/root"),
@@ -766,17 +813,106 @@ class Plugin:
             roots.append(real)
         return roots
 
+    def _steamworks_lib_module(self) -> Any:
+        module = getattr(self, "_swlib_module", None)
+        if module is None:
+            import importlib.util
+            path = os.path.join(decky.DECKY_PLUGIN_DIR, STEAMWORKS_LIB_MODULE_NAME)
+            spec = importlib.util.spec_from_file_location("finally_steamworks_lib", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self._swlib_module = module
+        return module
+
+    def _steamworks_override_dirs(self) -> List[str]:
+        return [FINALLY_SETTINGS_DIR, decky.DECKY_PLUGIN_DIR, os.path.join(decky.DECKY_PLUGIN_DIR, "lib")]
+
+    def _steamworks_cache_file(self) -> str:
+        return os.path.join(FINALLY_SETTINGS_DIR, "steamworks_lib.json")
+
     def _steamworks_lib_path(self) -> str:
-        """libsteam_api.so: the Steam Deck path first, then the same place under
-        whichever Steam install this system has (other users, Flatpak Steam)."""
-        if os.path.exists(STEAMWORKS_LIB_PATH):
-            return STEAMWORKS_LIB_PATH
-        for root in self._steam_roots():
-            for sub in ("steamrt64", "linux64", "ubuntu12_64"):
-                candidate = os.path.join(root, sub, "libsteam_api.so")
-                if os.path.exists(candidate):
-                    return candidate
-        return STEAMWORKS_LIB_PATH
+        """libsteam_api.so for the helpers ("" when none was found yet).
+
+        Cheap: the remembered answer or Steam's own folders. The full search
+        (installed native Linux games ship it too) runs once in the
+        background, see _find_steamworks_lib."""
+        cached = getattr(self, "_swlib_path", None)
+        if cached and os.path.isfile(cached):
+            return cached
+        try:
+            module = self._steamworks_lib_module()
+            remembered = (self._read_json_file(self._steamworks_cache_file()) or {}).get("path")
+            quick = module.candidates(self._steam_roots(), [], self._steamworks_override_dirs(), scan_games=False)
+            if isinstance(remembered, str):
+                quick.append(remembered)
+            found = module.pick(quick)
+        except Exception as err:  # noqa: BLE001
+            decky.logger.warning("Steamworks library lookup failed: %s", err)
+            found = None
+        if found:
+            self._swlib_path = found
+            return found
+        return ""
+
+    def _find_steamworks_lib(self) -> str:
+        """The full search (blocking; run it in a thread). Remembers the result."""
+        path = self._steamworks_lib_path()
+        if path:
+            return path
+        try:
+            module = self._steamworks_lib_module()
+            every = module.candidates(
+                self._steam_roots(), self._steam_library_dirs(), self._steamworks_override_dirs(), scan_games=True
+            )
+            path = module.pick(every) or ""
+            self._swlib_scan_count = len(every)
+        except Exception as err:  # noqa: BLE001
+            decky.logger.warning("Steamworks library search failed: %s", err)
+            path = ""
+        self._swlib_searched = True
+        self._swlib_searched_at = time.monotonic()
+        if path:
+            self._swlib_path = path
+            try:
+                os.makedirs(FINALLY_SETTINGS_DIR, exist_ok=True)
+                self._write_json_file(self._steamworks_cache_file(), {"path": path, "found_at": time.time()})
+            except Exception:
+                pass
+            decky.logger.info("Steamworks library: %s", path)
+        else:
+            decky.logger.warning(
+                "No usable libsteam_api.so found (Steam folders and installed native games). The achievement list "
+                "falls back to Steam's local files; put a 64-bit libsteam_api.so in %s to enable live tracking.",
+                FINALLY_SETTINGS_DIR,
+            )
+        return path
+
+    async def _ensure_steamworks_lib(self) -> str:
+        """The library path, running the full search once if needed (never twice at the same time)."""
+        path = self._steamworks_lib_path()
+        if path:
+            return path
+        if getattr(self, "_swlib_searched", False) and time.monotonic() - getattr(self, "_swlib_searched_at", 0.0) < 600:
+            return path
+        lock = getattr(self, "_swlib_lock", None)
+        if lock is None:
+            lock = self._swlib_lock = asyncio.Lock()
+        async with lock:
+            if getattr(self, "_swlib_searched", False) and time.monotonic() - getattr(self, "_swlib_searched_at", 0.0) < 600:
+                return self._steamworks_lib_path()
+            self._swlib_searched = False
+            return await asyncio.to_thread(self._find_steamworks_lib)
+
+    def _steamworks_env(self, appid: int, lib_path: str) -> Dict[str, str]:
+        env = os.environ.copy()
+        env["SteamAppId"] = str(appid)
+        env["SteamGameId"] = str(appid)
+        env["LD_LIBRARY_PATH"] = os.path.dirname(lib_path) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        env["FINALLY_STEAM_ROOTS"] = os.pathsep.join(self._steam_roots())
+        # libsteam_api.so finds the running Steam through ~/.steam/sdk64: HOME must be the Steam user's.
+        if not env.get("HOME") or (env.get("HOME") == "/root" and USER_HOME != "/root"):
+            env["HOME"] = USER_HOME
+        return env
 
     def _steam_library_dirs(self) -> List[str]:
         """Every Steam library folder (internal storage, SD card, other
@@ -1197,8 +1333,6 @@ class Plugin:
         self._desc_attempts[key] = attempts
         if attempts >= DESCRIPTION_MAX_ATTEMPTS:
             self._desc_tried.add(key)
-        if not os.path.exists(self._steamworks_lib_path()):
-            return ""
         probe = await self._run_oneshot_probe(appid, STEAMWORKS_LIST_HELPER_NAME)
         for item in probe.get("achievements", []) if isinstance(probe, dict) else []:
             text = str(item.get("desc") or "").strip()
@@ -1369,7 +1503,7 @@ class Plugin:
             return None
 
     def _share_dir(self) -> str:
-        home = getattr(decky, "DECKY_USER_HOME", None) or "/home/deck"
+        home = USER_HOME
         for base in (os.path.join(home, "Pictures"), home):
             if os.path.isdir(base):
                 return os.path.join(base, SHARE_DIR_NAME)
@@ -1503,7 +1637,7 @@ class Plugin:
                 with open(GAMESCOPE_SCREENSHOT_PATH, "rb") as src, open(path, "wb") as dst:
                     dst.write(src.read())
                 try:
-                    home = getattr(decky, "DECKY_USER_HOME", None) or "/home/deck"
+                    home = USER_HOME
                     st = os.stat(home)
                     for target in (os.path.dirname(directory), directory, path):
                         os.chown(target, st.st_uid, st.st_gid)
@@ -2237,9 +2371,9 @@ class Plugin:
         "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
     )
     GAME_ICON_LOCAL_CANDIDATES = (
+        STEAM_ROOT + "/appcache/librarycache/{appid}_icon.jpg",
+        STEAM_ROOT + "/appcache/librarycache/{appid}/*icon*.jpg",
         "/home/deck/.local/share/Steam/appcache/librarycache/{appid}_icon.jpg",
-        "/home/deck/.local/share/Steam/appcache/librarycache/{appid}/*icon*.jpg",
-        "/home/deck/.steam/steam/appcache/librarycache/{appid}_icon.jpg",
     )
 
     def _game_icon_path(self, appid: Optional[int]) -> Optional[str]:
@@ -2299,11 +2433,11 @@ class Plugin:
         return None
 
     GAME_ART_LOCAL_CANDIDATES = (
+        STEAM_ROOT + "/appcache/librarycache/{appid}_header.jpg",
+        STEAM_ROOT + "/appcache/librarycache/{appid}_library_hero.jpg",
+        STEAM_ROOT + "/appcache/librarycache/{appid}/**/header*.jpg",
+        STEAM_ROOT + "/appcache/librarycache/{appid}/**/library_hero*.jpg",
         "/home/deck/.local/share/Steam/appcache/librarycache/{appid}_header.jpg",
-        "/home/deck/.local/share/Steam/appcache/librarycache/{appid}_library_hero.jpg",
-        "/home/deck/.local/share/Steam/appcache/librarycache/{appid}/**/header*.jpg",
-        "/home/deck/.local/share/Steam/appcache/librarycache/{appid}/**/library_hero*.jpg",
-        "/home/deck/.steam/steam/appcache/librarycache/{appid}_header.jpg",
     )
     GAME_ART_CDN_CANDIDATES = (
         "https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg",
@@ -2843,12 +2977,21 @@ class Plugin:
         if resolved is None:
             return {"ok": False, "error": "no_running_game", "appid": None, "name": None, "achievements": []}
         name = self._game_name(resolved)
-        if not os.path.exists(self._steamworks_lib_path()):
-            return {"ok": False, "error": "steamworks_lib_missing", "appid": resolved, "name": name, "achievements": []}
-
         probe = await self._run_oneshot_probe(resolved, STEAMWORKS_LIST_HELPER_NAME)
-        if probe.get("type") == "error":
-            return {"ok": False, "error": probe.get("error", "probe_failed"), "appid": resolved, "name": name, "achievements": []}
+        if probe.get("type") == "error" or not probe.get("achievements"):
+            # No Steamworks (library missing, game not running, init refused): Steam's own local files have
+            # the full list (schema) and what is unlocked (UserGameStats), so the browser still works.
+            local = await asyncio.to_thread(self._local_achievement_list, resolved)
+            if local:
+                percentages = await self._within_budget(self._steam_api_global_percentages(resolved), 3.0) or {}
+                for item in local:
+                    item["percent"] = percentages.get(item["id"])
+                decky.logger.info(
+                    "Achievement list for %s from Steam's local files (Steamworks: %s)", resolved, probe.get("error")
+                )
+                probe = {"type": "list", "achievements": local}
+            elif probe.get("type") == "error":
+                return {"ok": False, "error": probe.get("error", "probe_failed"), "appid": resolved, "name": name, "achievements": []}
 
         icons = await self._browser_icons(resolved)
         achievements: List[Dict[str, Any]] = []
@@ -2890,6 +3033,60 @@ class Plugin:
             "unlocked_count": len(unlocked),
             "achievements": unlocked + locked,
         }
+
+    def _stats_bin_for_appid(self, appid: int) -> Optional[str]:
+        """The newest appcache/stats/UserGameStats_<account>_<appid>.bin, or None."""
+        best: Optional[Tuple[int, str]] = None
+        for directory in self._stats_dirs():
+            for path in glob.glob(os.path.join(directory, f"UserGameStats_*_{appid}.bin")):
+                try:
+                    stamp = os.stat(path).st_mtime_ns
+                except OSError:
+                    continue
+                if best is None or stamp > best[0]:
+                    best = (stamp, path)
+        return best[1] if best else None
+
+    def _local_achievement_list(self, appid: int) -> List[Dict[str, Any]]:
+        """Every achievement of the game in the helper's list format, read from
+        Steam's local schema and stats files (no Steamworks needed). [] if
+        Steam has no schema for this game on disk."""
+        schema = self._local_stats_schema(appid)
+        if not schema["by_id"]:
+            return []
+        stats_path = self._stats_bin_for_appid(appid)
+        unlocked = (self._stats_bin_unlocks(appid, stats_path) if stats_path else None) or {}
+        result: List[Dict[str, Any]] = []
+        seen = set()
+        for aid in list(schema["by_bit"].values()) + list(schema["by_id"].keys()):
+            if aid in seen:
+                continue
+            seen.add(aid)
+            entry = schema["by_id"].get(aid) or {}
+            name, desc = self._local_achievement_text(appid, aid)
+            result.append({
+                "id": aid,
+                "name": name or aid,
+                "desc": desc,
+                "hidden": bool(entry.get("hidden")),
+                "achieved": aid in unlocked,
+                "unlock_time": unlocked.get(aid, 0),
+                "percent": None,
+            })
+        return result
+
+    def _local_tracker_state(self, appid: int, achievement_id: str) -> Optional[Dict[str, Any]]:
+        """Tracker state from Steam's local stats file (locked/unlocked only)."""
+        stats_path = self._stats_bin_for_appid(appid)
+        if not stats_path:
+            return None
+        unlocked = self._stats_bin_unlocks(appid, stats_path)
+        if unlocked is None:
+            return None
+        lowered = achievement_id.lower()
+        achieved = any(k == achievement_id or k.lower() == lowered for k in unlocked)
+        return {"type": "progress", "achieved": achieved, "percent": None, "has_progress": False,
+                "current": None, "max": None}
 
     async def _browser_icons(self, appid: int) -> Dict[str, str]:
         """Icon URL per achievement id: Web API schema (colored) first, then
@@ -2944,13 +3141,13 @@ class Plugin:
         helper_path = os.path.join(decky.DECKY_PLUGIN_DIR, script_name)
         if not os.path.exists(helper_path):
             return {"type": "error", "error": "helper_missing"}
-        env = os.environ.copy()
-        env["SteamAppId"] = str(appid)
-        env["SteamGameId"] = str(appid)
-        env["LD_LIBRARY_PATH"] = os.path.dirname(self._steamworks_lib_path()) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+        lib_path = await self._ensure_steamworks_lib()
+        if not lib_path:
+            return {"type": "error", "error": "steamworks_lib_missing"}
+        env = self._steamworks_env(appid, lib_path)
         try:
             process = await asyncio.create_subprocess_exec(
-                STEAMWORKS_PYTHON, helper_path, "--appid", str(appid), "--lib", self._steamworks_lib_path(),
+                STEAMWORKS_PYTHON, helper_path, "--appid", str(appid), "--lib", lib_path,
                 *(extra_args or []),
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
             )
@@ -3196,14 +3393,18 @@ class Plugin:
                     await self._stop_tracker_overlay()
                     await self._tracker_sleep(TRACKER_IDLE_POLL_SECONDS)
                     continue
-                if not os.path.exists(self._steamworks_lib_path()):
-                    await self._tracker_sleep(TRACKER_ACTIVE_POLL_SECONDS)
-                    continue
-
                 await self._write_tracker_style(running)
                 probe = await self._run_oneshot_probe(
                     running, STEAMWORKS_TRACK_HELPER_NAME, ["--achievement", str(target.get("achievement_id"))]
                 )
+                if probe.get("type") != "progress":
+                    local = await asyncio.to_thread(
+                        self._local_tracker_state, running, str(target.get("achievement_id"))
+                    )
+                    if local is not None:
+                        previous = self._read_json_file(self._tracker_paths()["state"]) or {}
+                        local["percent"] = previous.get("percent")
+                        probe = local
                 if probe.get("type") == "progress":
                     self._write_json_file(
                         self._tracker_paths()["state"],
@@ -3241,7 +3442,7 @@ class Plugin:
         return _I18N or None
 
     def _user_homes(self) -> List[str]:
-        homes = [str(getattr(decky, "DECKY_USER_HOME", "") or ""), "/home/deck"]
+        homes = [USER_HOME, str(getattr(decky, "DECKY_USER_HOME", "") or ""), "/home/deck"]
         return [h for h in homes if h and os.path.isdir(h)]
 
     def _detected_language_path(self) -> str:
@@ -3982,6 +4183,8 @@ class Plugin:
 
         asyncio.create_task(self._show_gamescope_overlay(payload))
         await decky.emit("finally_show", payload)
+        if not test:
+            self._tracker_wake.set()   # a pinned achievement shows "unlocked" right away
 
         self._last_match_timestamp = timestamp
         self._last_match_sample = line_hint
@@ -4100,14 +4303,14 @@ class Plugin:
     ) -> Optional[str]:
         if accountid:
             path = (
-                f"/home/deck/.local/share/Steam/userdata/{accountid}/"
+                f"{STEAM_ROOT}/userdata/{accountid}/"
                 f"config/librarycache/{appid}.json"
             )
             if os.path.exists(path):
                 return path
 
         matches = glob.glob(
-            f"/home/deck/.local/share/Steam/userdata/*/config/librarycache/{appid}.json"
+            f"{STEAM_ROOT}/userdata/*/config/librarycache/{appid}.json"
         )
         if matches:
             return matches[0]
@@ -4194,9 +4397,8 @@ class Plugin:
         for path in self._iter_librarycache_dirs():
             self._add_inotify_watch(libc, fd, path, "librarycache_dir", watch_mask)
 
-        self._add_inotify_watch(
-            libc, fd, STEAM_APPCACHE_STATS_DIR, "appcache_stats_dir", watch_mask
-        )
+        for stats_dir in self._stats_dirs() or [STEAM_APPCACHE_STATS_DIR]:
+            self._add_inotify_watch(libc, fd, stats_dir, "appcache_stats_dir", watch_mask)
         self._add_inotify_watch(libc, fd, STEAM_LOG_DIR, "steam_log_dir", log_mask)
 
         if not self._inotify_watches:
@@ -4351,21 +4553,14 @@ class Plugin:
             self._steamworks_status = "disabled_helper_missing"
             self._steamworks_running = False
             return
-        lib_path = self._steamworks_lib_path()
-        if not os.path.exists(lib_path):
+        lib_path = await self._ensure_steamworks_lib()
+        if not lib_path:
             self._steamworks_status = "disabled_lib_missing"
-            self._steamworks_last_error = lib_path
+            self._steamworks_last_error = "libsteam_api.so not found"
             self._steamworks_running = False
             return
 
-        env = os.environ.copy()
-        env["SteamAppId"] = str(appid)
-        env["SteamGameId"] = str(appid)
-        env["LD_LIBRARY_PATH"] = (
-            os.path.dirname(lib_path)
-            + os.pathsep
-            + env.get("LD_LIBRARY_PATH", "")
-        )
+        env = self._steamworks_env(appid, lib_path)
 
         process = await asyncio.create_subprocess_exec(
             STEAMWORKS_PYTHON,
@@ -4560,7 +4755,7 @@ class Plugin:
 
     def _steamid64_from_userdata(self) -> Optional[int]:
         candidates: List[Tuple[int, int]] = []
-        for path in glob.glob("/home/deck/.local/share/Steam/userdata/*"):
+        for path in glob.glob(STEAM_USERDATA_GLOB):
             account_id_text = os.path.basename(path)
             if not account_id_text.isdigit():
                 continue

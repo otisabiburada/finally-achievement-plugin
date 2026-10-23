@@ -7,6 +7,9 @@ import sys
 import time
 from typing import Dict, List, Optional
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from finally_steamworks_lib import SteamworksError, open_user_stats, optional  # noqa: E402
+
 
 def emit(payload: Dict[str, object]) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
@@ -19,15 +22,6 @@ def decode(value: Optional[bytes]) -> str:
 
 
 def configure_api(lib: ctypes.CDLL) -> None:
-    lib.SteamAPI_InitFlat.argtypes = [ctypes.c_char_p]
-    lib.SteamAPI_InitFlat.restype = ctypes.c_char_p
-    lib.SteamAPI_RunCallbacks.argtypes = []
-    lib.SteamAPI_RunCallbacks.restype = None
-    lib.SteamAPI_Shutdown.argtypes = []
-    lib.SteamAPI_Shutdown.restype = None
-
-    lib.SteamAPI_SteamUserStats_v013.argtypes = []
-    lib.SteamAPI_SteamUserStats_v013.restype = ctypes.c_void_p
     lib.SteamAPI_ISteamUserStats_GetNumAchievements.argtypes = [ctypes.c_void_p]
     lib.SteamAPI_ISteamUserStats_GetNumAchievements.restype = ctypes.c_uint32
     lib.SteamAPI_ISteamUserStats_GetAchievementName.argtypes = [
@@ -123,32 +117,19 @@ def main() -> int:
     parser.add_argument("--poll-ms", type=int, default=100)
     parser.add_argument("--baseline-ms", type=int, default=2500)
     parser.add_argument("--refresh-ms", type=int, default=0)
-    parser.add_argument("--lib", default="/home/deck/.local/share/Steam/steamrt64/libsteam_api.so")
+    parser.add_argument("--lib", required=True)
     args = parser.parse_args()
 
     os.environ["SteamAppId"] = str(args.appid)
     os.environ["SteamGameId"] = str(args.appid)
 
     try:
-        lib = ctypes.CDLL(args.lib)
-        configure_api(lib)
-
-        error = ctypes.create_string_buffer(1024)
-        init_error = lib.SteamAPI_InitFlat(error)
-        if init_error:
-            emit(
-                {
-                    "type": "error",
-                    "appid": args.appid,
-                    "error": decode(error.value) or decode(init_error),
-                }
-            )
+        try:
+            lib, stats = open_user_stats(args.lib)
+        except SteamworksError as err:
+            emit({"type": "error", "appid": args.appid, "error": str(err)})
             return 2
-
-        stats = lib.SteamAPI_SteamUserStats_v013()
-        if not stats:
-            emit({"type": "error", "appid": args.appid, "error": "SteamUserStats unavailable"})
-            return 3
+        configure_api(lib)
 
         names = get_achievement_names(lib, stats)
 
@@ -176,7 +157,10 @@ def main() -> int:
             if refresh and time.monotonic() >= next_refresh:
                 request_stats(lib, stats)
                 next_refresh = time.monotonic() + refresh
+            started = time.monotonic()
             current = snapshot(lib, stats, names)
+            # Games with hundreds of achievements: keep the poll under ~20% of one core.
+            cost = time.monotonic() - started
             # Running count of unlocked achievements, advanced one unlock at
             # a time, so that when several land in the same poll only the
             # LAST one reports unlocked == total (the game-complete signal).
@@ -198,7 +182,7 @@ def main() -> int:
                         }
                     )
             previous = current
-            time.sleep(interval)
+            time.sleep(max(interval, cost * 4))
     except KeyboardInterrupt:
         return 0
     except Exception as err:

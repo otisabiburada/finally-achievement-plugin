@@ -16,6 +16,9 @@ import sys
 import time
 from typing import Dict, List, Optional
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from finally_steamworks_lib import SteamworksError, open_user_stats, optional  # noqa: E402
+
 
 def emit(payload: Dict[str, object]) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
@@ -28,15 +31,6 @@ def decode(value: Optional[bytes]) -> str:
 
 
 def configure_api(lib: ctypes.CDLL) -> None:
-    lib.SteamAPI_InitFlat.argtypes = [ctypes.c_char_p]
-    lib.SteamAPI_InitFlat.restype = ctypes.c_char_p
-    lib.SteamAPI_RunCallbacks.argtypes = []
-    lib.SteamAPI_RunCallbacks.restype = None
-    lib.SteamAPI_Shutdown.argtypes = []
-    lib.SteamAPI_Shutdown.restype = None
-
-    lib.SteamAPI_SteamUserStats_v013.argtypes = []
-    lib.SteamAPI_SteamUserStats_v013.restype = ctypes.c_void_p
     lib.SteamAPI_ISteamUserStats_GetNumAchievements.argtypes = [ctypes.c_void_p]
     lib.SteamAPI_ISteamUserStats_GetNumAchievements.restype = ctypes.c_uint32
     lib.SteamAPI_ISteamUserStats_GetAchievementName.argtypes = [
@@ -50,13 +44,12 @@ def configure_api(lib: ctypes.CDLL) -> None:
         ctypes.POINTER(ctypes.c_bool),
     ]
     lib.SteamAPI_ISteamUserStats_GetAchievement.restype = ctypes.c_bool
-    lib.SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime.argtypes = [
+    optional(lib, "SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime", [
         ctypes.c_void_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_bool),
         ctypes.POINTER(ctypes.c_uint32),
-    ]
-    lib.SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime.restype = ctypes.c_bool
+    ], ctypes.c_bool)
     lib.SteamAPI_ISteamUserStats_GetAchievementDisplayAttribute.argtypes = [
         ctypes.c_void_p,
         ctypes.c_char_p,
@@ -85,7 +78,8 @@ def get_achievement_names(lib: ctypes.CDLL, stats: int) -> List[str]:
 def achieved_and_unlock_time(lib: ctypes.CDLL, stats: int, achievement_id: str):
     achieved = ctypes.c_bool(False)
     unlock_time = ctypes.c_uint32(0)
-    ok = lib.SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime(
+    with_time = getattr(lib, "SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime", None)
+    ok = with_time is not None and with_time(
         stats,
         achievement_id.encode("utf-8"),
         ctypes.byref(achieved),
@@ -128,7 +122,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--appid", type=int, required=True)
     parser.add_argument("--baseline-ms", type=int, default=1200)
-    parser.add_argument("--lib", default="/home/deck/.local/share/Steam/steamrt64/libsteam_api.so")
+    parser.add_argument("--lib", required=True)
     args = parser.parse_args()
 
     os.environ["SteamAppId"] = str(args.appid)
@@ -136,25 +130,12 @@ def main() -> int:
 
     lib = None
     try:
-        lib = ctypes.CDLL(args.lib)
-        configure_api(lib)
-
-        error = ctypes.create_string_buffer(1024)
-        init_error = lib.SteamAPI_InitFlat(error)
-        if init_error:
-            emit(
-                {
-                    "type": "error",
-                    "appid": args.appid,
-                    "error": decode(error.value) or decode(init_error),
-                }
-            )
+        try:
+            lib, stats = open_user_stats(args.lib)
+        except SteamworksError as err:
+            emit({"type": "error", "appid": args.appid, "error": str(err)})
             return 2
-
-        stats = lib.SteamAPI_SteamUserStats_v013()
-        if not stats:
-            emit({"type": "error", "appid": args.appid, "error": "SteamUserStats unavailable"})
-            return 3
+        configure_api(lib)
 
         # A short settle period lets Steam finish delivering the stats/achievements
         # callback before we start reading -- mirrors steamworks_probe.py's baseline

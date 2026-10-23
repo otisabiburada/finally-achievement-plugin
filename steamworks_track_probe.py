@@ -29,6 +29,9 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from finally_steamworks_lib import SteamworksError, open_user_stats, optional  # noqa: E402
+
 
 def emit(payload: Dict[str, object]) -> None:
     print(json.dumps(payload, separators=(",", ":")), flush=True)
@@ -41,15 +44,6 @@ def decode(value: Optional[bytes]) -> str:
 
 
 def configure_api(lib: ctypes.CDLL) -> None:
-    lib.SteamAPI_InitFlat.argtypes = [ctypes.c_char_p]
-    lib.SteamAPI_InitFlat.restype = ctypes.c_char_p
-    lib.SteamAPI_RunCallbacks.argtypes = []
-    lib.SteamAPI_RunCallbacks.restype = None
-    lib.SteamAPI_Shutdown.argtypes = []
-    lib.SteamAPI_Shutdown.restype = None
-
-    lib.SteamAPI_SteamUserStats_v013.argtypes = []
-    lib.SteamAPI_SteamUserStats_v013.restype = ctypes.c_void_p
 
     lib.SteamAPI_ISteamUserStats_GetAchievement.argtypes = [
         ctypes.c_void_p,
@@ -65,20 +59,18 @@ def configure_api(lib: ctypes.CDLL) -> None:
     ]
     lib.SteamAPI_ISteamUserStats_GetAchievementAchievedPercent.restype = ctypes.c_bool
 
-    lib.SteamAPI_ISteamUserStats_GetAchievementProgressLimitsInt32.argtypes = [
+    optional(lib, "SteamAPI_ISteamUserStats_GetAchievementProgressLimitsInt32", [
         ctypes.c_void_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_int32),
         ctypes.POINTER(ctypes.c_int32),
-    ]
-    lib.SteamAPI_ISteamUserStats_GetAchievementProgressLimitsInt32.restype = ctypes.c_bool
+    ], ctypes.c_bool)
 
-    lib.SteamAPI_ISteamUserStats_GetStatInt32.argtypes = [
+    optional(lib, "SteamAPI_ISteamUserStats_GetStatInt32", [
         ctypes.c_void_p,
         ctypes.c_char_p,
         ctypes.POINTER(ctypes.c_int32),
-    ]
-    lib.SteamAPI_ISteamUserStats_GetStatInt32.restype = ctypes.c_bool
+    ], ctypes.c_bool)
 
 
 # --- Minimal binary-VDF reader (Valve's "appinfo"-style binary format) ------
@@ -136,10 +128,11 @@ def _parse_binary_vdf_dict(data: bytes, offset: int, depth: int = 0) -> (Dict[st
 
 
 def _find_schema_files(appid: int) -> List[str]:
-    patterns = [
-        f"/home/deck/.local/share/Steam/appcache/stats/UserGameStatsSchema_{appid}.bin",
-        f"/home/deck/.steam/steam/appcache/stats/UserGameStatsSchema_{appid}.bin",
-    ]
+    roots = [r for r in os.environ.get("FINALLY_STEAM_ROOTS", "").split(os.pathsep) if r]
+    roots += [os.path.expanduser("~/.local/share/Steam"), os.path.expanduser("~/.steam/steam"),
+              "/home/deck/.local/share/Steam", "/home/deck/.steam/steam"]
+    patterns = sorted({os.path.realpath(os.path.join(r, "appcache", "stats", f"UserGameStatsSchema_{appid}.bin"))
+                       for r in roots})
     found = []
     for pattern in patterns:
         found.extend(glob.glob(pattern))
@@ -201,7 +194,7 @@ def main() -> int:
     parser.add_argument("--appid", type=int, required=True)
     parser.add_argument("--achievement", required=True)
     parser.add_argument("--baseline-ms", type=int, default=800)
-    parser.add_argument("--lib", default="/home/deck/.local/share/Steam/steamrt64/libsteam_api.so")
+    parser.add_argument("--lib", required=True)
     args = parser.parse_args()
 
     os.environ["SteamAppId"] = str(args.appid)
@@ -209,19 +202,12 @@ def main() -> int:
 
     lib = None
     try:
-        lib = ctypes.CDLL(args.lib)
-        configure_api(lib)
-
-        error = ctypes.create_string_buffer(1024)
-        init_error = lib.SteamAPI_InitFlat(error)
-        if init_error:
-            emit({"type": "error", "error": decode(error.value) or decode(init_error)})
+        try:
+            lib, stats = open_user_stats(args.lib)
+        except SteamworksError as err:
+            emit({"type": "error", "error": str(err)})
             return 2
-
-        stats = lib.SteamAPI_SteamUserStats_v013()
-        if not stats:
-            emit({"type": "error", "error": "SteamUserStats unavailable"})
-            return 3
+        configure_api(lib)
 
         deadline = time.monotonic() + max(0.0, args.baseline_ms / 1000.0)
         while time.monotonic() < deadline:
@@ -251,7 +237,8 @@ def main() -> int:
 
         min_bound = ctypes.c_int32(0)
         max_bound = ctypes.c_int32(0)
-        supports_progress = lib.SteamAPI_ISteamUserStats_GetAchievementProgressLimitsInt32(
+        limits = getattr(lib, "SteamAPI_ISteamUserStats_GetAchievementProgressLimitsInt32", None)
+        supports_progress = limits is not None and hasattr(lib, "SteamAPI_ISteamUserStats_GetStatInt32") and limits(
             stats, aid, ctypes.byref(min_bound), ctypes.byref(max_bound)
         )
 

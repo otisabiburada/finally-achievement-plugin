@@ -13,7 +13,7 @@
   <img alt="Decky Loader" src="https://img.shields.io/badge/Decky%20Loader-plugin-6366f1">
   <img alt="Platform" src="https://img.shields.io/badge/SteamOS-Steam%20Deck-1a9fff">
   <img alt="License" src="https://img.shields.io/badge/license-BSD--3--Clause-green">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.7.0-f59e0b">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.7.1-f59e0b">
 </p>
 
 <p align="center">

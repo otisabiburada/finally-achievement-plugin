@@ -2,7 +2,7 @@
   "name": "Finally Achievement Plugin",
   "author": "otisabi",
   "description": "Finally Achievement Plugin: SteamOS achievement popups in 19 templates, plus an achievement browser and an on-screen tracker that share the popup look.",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "flags": [],
   "api_version": 1,
   "publish": {
