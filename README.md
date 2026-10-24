@@ -2,7 +2,7 @@
   <img src="docs/images/banner.png" alt="Finally Achievement Plugin" width="100%">
 </p>
 
-<h1 align="center">Finally Achievement Plugin</h1>
+<h1 align="center">Finally Decky Achievement Plugin</h1>
 
 <p align="center">
   <b>Console-style achievement popups for Steam Deck, right in Gaming Mode.</b><br>
